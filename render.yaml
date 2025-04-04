@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: docsend-slack-bot
+    env: node
+    buildCommand: npm install
+    startCommand: node app.js
+    envVars:
+      - key: NODE_VERSION
+        value: 18.17.0
+      - key: PORT
+        value: 10000 
