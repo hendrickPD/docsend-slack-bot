@@ -8,9 +8,9 @@ const express = require('express');
 
 // Initialize Express app
 const expressApp = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 10000;
 
-// Initialize Slack app
+// Initialize Slack app with Socket Mode
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
@@ -158,12 +158,18 @@ expressApp.get('/', (req, res) => {
 });
 
 // Start the Express server
-expressApp.listen(port, () => {
+const server = expressApp.listen(port, () => {
   console.log(`Express server is running on port ${port}`);
 });
 
 // Start the Slack app
 (async () => {
-  await app.start();
-  console.log('⚡️ Bolt app is running!');
+  try {
+    await app.start();
+    console.log('⚡️ Bolt app is running with Socket Mode!');
+  } catch (error) {
+    console.error('Error starting Slack app:', error);
+    server.close();
+    process.exit(1);
+  }
 })(); 
