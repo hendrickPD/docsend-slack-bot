@@ -21,6 +21,7 @@ function extractPasswordFromUrl(url) {
 
 // Function to convert DocSend link to PDF
 async function convertDocSendToPDF(url) {
+  console.log('Starting PDF conversion for URL:', url);
   const browser = await puppeteer.launch({
     headless: 'new',
     args: ['--no-sandbox', '--disable-setuid-sandbox']
@@ -31,6 +32,7 @@ async function convertDocSendToPDF(url) {
     const password = extractPasswordFromUrl(url);
 
     // Navigate to the document
+    console.log('Navigating to URL...');
     await page.goto(url, { waitUntil: 'networkidle0' });
 
     // Check if we're on the email page
@@ -39,6 +41,7 @@ async function convertDocSendToPDF(url) {
     });
 
     if (isEmailPage) {
+      console.log('Email page detected');
       // Use default email from environment variables
       if (process.env.DOCSEND_EMAIL) {
         await page.type('input[type="email"]', process.env.DOCSEND_EMAIL);
@@ -55,6 +58,7 @@ async function convertDocSendToPDF(url) {
     });
 
     if (isPasswordPage) {
+      console.log('Password page detected');
       if (password) {
         // If password is in URL, use it
         await page.type('input[type="password"]', password);
@@ -73,15 +77,18 @@ async function convertDocSendToPDF(url) {
     }
 
     // Wait for the document to load
+    console.log('Waiting for document to load...');
     await page.waitForSelector('.document-view', { timeout: 10000 });
 
     // Generate PDF
+    console.log('Generating PDF...');
     const pdf = await page.pdf({
       format: 'A4',
       printBackground: true,
       margin: { top: '20px', right: '20px', bottom: '20px', left: '20px' }
     });
 
+    console.log('PDF generated successfully');
     return pdf;
   } catch (error) {
     console.error('PDF conversion error:', error);
@@ -93,6 +100,7 @@ async function convertDocSendToPDF(url) {
 
 // Listen for messages containing DocSend links
 app.message(/([a-zA-Z0-9-]+\.)?docsend\.com\/view\//, async ({ message, say }) => {
+  console.log('Received message:', message.text);
   try {
     await say({
       text: "I'll convert that DocSend link to a PDF for you! Please wait...",
@@ -101,11 +109,14 @@ app.message(/([a-zA-Z0-9-]+\.)?docsend\.com\/view\//, async ({ message, say }) =
 
     // Extract DocSend URL from message
     const urlMatch = message.text.match(/(https?:\/\/(?:[a-zA-Z0-9-]+\.)?docsend\.com\/view\/[^\s]+)/);
+    console.log('URL match:', urlMatch);
+    
     if (!urlMatch) {
       throw new Error('No valid DocSend URL found in message');
     }
 
     const docSendUrl = urlMatch[1];
+    console.log('Processing URL:', docSendUrl);
     const pdf = await convertDocSendToPDF(docSendUrl);
 
     // Save PDF temporarily
@@ -114,6 +125,7 @@ app.message(/([a-zA-Z0-9-]+\.)?docsend\.com\/view\//, async ({ message, say }) =
 
     // Upload PDF to Slack
     try {
+      console.log('Uploading PDF to Slack...');
       await app.client.files.upload({
         channels: message.channel,
         thread_ts: message.ts,
@@ -121,6 +133,7 @@ app.message(/([a-zA-Z0-9-]+\.)?docsend\.com\/view\//, async ({ message, say }) =
         file: fs.createReadStream(tempFilePath),
         filename: 'document.pdf'
       });
+      console.log('PDF uploaded successfully');
     } finally {
       // Clean up temporary file
       fs.unlinkSync(tempFilePath);
