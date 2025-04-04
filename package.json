@@ -1,18 +1,20 @@
 {
   "name": "docsend-slack-bot",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "app.js",
   "scripts": {
+    "start": "node app.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
+  "description": "A Slack bot that converts DocSend links to PDFs",
   "dependencies": {
-    "@slack/bolt": "^4.2.1",
-    "axios": "^1.8.4",
-    "dotenv": "^16.4.7",
-    "puppeteer": "^24.6.0"
+    "@slack/bolt": "^3.17.0",
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1",
+    "express": "^4.21.2",
+    "puppeteer": "^21.5.0"
   }
 }

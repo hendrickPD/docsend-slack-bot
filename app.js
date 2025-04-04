@@ -4,6 +4,11 @@ const puppeteer = require('puppeteer');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const express = require('express');
+
+// Initialize Express app
+const expressApp = express();
+const port = process.env.PORT || 3000;
 
 // Initialize Slack app
 const app = new App({
@@ -147,9 +152,18 @@ app.message(/([a-zA-Z0-9-]+\.)?docsend\.com\/view\//, async ({ message, say }) =
   }
 });
 
-// Start the app
+// Health check endpoint
+expressApp.get('/', (req, res) => {
+  res.send('DocSend to PDF Slack Bot is running!');
+});
+
+// Start the Express server
+expressApp.listen(port, () => {
+  console.log(`Express server is running on port ${port}`);
+});
+
+// Start the Slack app
 (async () => {
-  const port = process.env.PORT || 3000;
-  await app.start(port);
-  console.log(`⚡️ Bolt app is running on port ${port}!`);
+  await app.start();
+  console.log('⚡️ Bolt app is running!');
 })(); 
