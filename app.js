@@ -3,6 +3,9 @@ const { App } = require('@slack/bolt');
 const express = require('express');
 const crypto = require('crypto');
 const puppeteer = require('puppeteer');
+const { PDFDocument } = require('pdf-lib');
+const fs = require('fs');
+const path = require('path');
 
 // Initialize Express app
 const expressApp = express();
@@ -87,7 +90,7 @@ const verifySlackRequest = (req) => {
 
 // Function to convert DocSend to PDF
 async function convertDocSendToPDF(url) {
-  console.log('Starting PDF conversion for:', url);
+  console.log('Starting document capture for:', url);
   
   const browser = await puppeteer.launch({
     headless: 'new',
@@ -125,7 +128,7 @@ async function convertDocSendToPDF(url) {
       'Upgrade-Insecure-Requests': '1'
     });
     
-    // Navigate to the DocSend URL with a more relaxed wait strategy
+    // Navigate to the DocSend URL
     console.log('Navigating to URL...');
     await page.goto(url, { 
       waitUntil: 'domcontentloaded',
@@ -135,10 +138,7 @@ async function convertDocSendToPDF(url) {
     // Wait for a short time to let the page load
     await page.waitForTimeout(5000);
     
-    // Take a screenshot for debugging
-    await page.screenshot({ path: 'debug.png' });
-    
-    // Check for email input form with multiple possible selectors
+    // Check for email input form
     console.log('Checking for email form...');
     const emailSelectors = [
       'input[type="email"]',
@@ -186,46 +186,9 @@ async function convertDocSendToPDF(url) {
           const submitButton = await page.$(selector);
           if (submitButton) {
             console.log('Found submit button with selector:', selector);
-            
-            // Try different ways to submit the form
-            try {
-              // Method 1: Direct click
-              await submitButton.click();
-              submitSuccess = true;
-            } catch (clickError) {
-              console.log('Click failed, trying alternative methods...');
-              
-              try {
-                // Method 2: JavaScript click
-                await page.evaluate((sel) => {
-                  const button = document.querySelector(sel);
-                  if (button) button.click();
-                }, selector);
-                submitSuccess = true;
-              } catch (jsClickError) {
-                console.log('JavaScript click failed, trying form submit...');
-                
-                try {
-                  // Method 3: Form submit
-                  await page.evaluate(() => {
-                    const form = document.querySelector('form');
-                    if (form) {
-                      form.submit();
-                      return true;
-                    }
-                    return false;
-                  });
-                  submitSuccess = true;
-                } catch (formSubmitError) {
-                  console.log('Form submit failed');
-                }
-              }
-            }
-            
-            if (submitSuccess) {
-              console.log('Form submitted successfully');
-              break;
-            }
+            await submitButton.click();
+            submitSuccess = true;
+            break;
           }
         } catch (error) {
           console.log('Error with selector:', selector, error);
@@ -233,7 +196,7 @@ async function convertDocSendToPDF(url) {
       }
       
       if (!submitSuccess) {
-        // Try one last method: simulate Enter key press
+        // Try Enter key press
         try {
           console.log('Trying Enter key press...');
           await page.keyboard.press('Enter');
@@ -247,27 +210,54 @@ async function convertDocSendToPDF(url) {
         throw new Error('Failed to submit the email form');
       }
       
-      // Wait for a short time after clicking
-      await page.waitForTimeout(3000);
-      
-      // Take another screenshot for debugging
-      await page.screenshot({ path: 'debug-after-submit.png' });
-      
-      // Check if we're still on the email form
-      const stillOnEmailForm = await page.$(emailSelectors[0]);
-      if (stillOnEmailForm) {
-        throw new Error('Authentication failed. Still on email form after submission.');
+      // Wait for document to load after submission
+      console.log('Waiting for document to load after form submission...');
+      await page.waitForTimeout(10000);
+    }
+    
+    // Wait for document content
+    console.log('Waiting for document content...');
+    const contentSelectors = [
+      'iframe',
+      'div[class*="viewer"]',
+      'div[class*="document"]',
+      'div[class*="content"]',
+      'div[class*="page"]',
+      'div[class*="slide"]',
+      'div[class*="preview"]',
+      'div[class*="embed"]'
+    ];
+    
+    let contentFound = false;
+    for (const selector of contentSelectors) {
+      try {
+        console.log('Checking for content with selector:', selector);
+        await page.waitForSelector(selector, { timeout: 30000 });
+        console.log('Found content with selector:', selector);
+        contentFound = true;
+        
+        // If it's an iframe, switch to it
+        if (selector === 'iframe') {
+          console.log('Switching to iframe...');
+          const frame = await page.$(selector);
+          if (frame) {
+            const frameHandle = await frame.contentFrame();
+            if (frameHandle) {
+              console.log('Successfully switched to iframe');
+              await frameHandle.waitForSelector('body', { timeout: 30000 });
+            }
+          }
+        }
+        
+        break;
+      } catch (error) {
+        console.log('Selector not found:', selector);
       }
     }
     
-    // Wait for either the document viewer or an error message
-    console.log('Waiting for document viewer...');
-    await Promise.race([
-      page.waitForSelector('.document-viewer', { timeout: 30000 }),
-      page.waitForSelector('.error-message', { timeout: 30000 }),
-      page.waitForSelector('iframe', { timeout: 30000 }),
-      page.waitForSelector('div[class*="viewer"]', { timeout: 30000 })
-    ]);
+    if (!contentFound) {
+      throw new Error('Could not find document content');
+    }
     
     // Check for error messages
     const errorMessage = await page.$('.error-message');
@@ -276,27 +266,109 @@ async function convertDocSendToPDF(url) {
       throw new Error(`Authentication error: ${errorText}`);
     }
     
-    // Generate PDF
-    console.log('Generating PDF...');
-    const pdf = await page.pdf({
-      format: 'A4',
-      printBackground: true,
-      margin: {
-        top: '20px',
-        right: '20px',
-        bottom: '20px',
-        left: '20px'
-      }
-    });
+    // Capture screenshots of each page
+    console.log('Capturing document pages...');
+    const screenshots = [];
     
-    console.log('PDF generated successfully');
-    return pdf;
+    // Try to find page navigation elements
+    const pageNavSelectors = [
+      'button[aria-label*="next" i]',
+      'button[aria-label*="Next" i]',
+      'button[class*="next" i]',
+      'button[class*="Next" i]',
+      'div[class*="next" i]',
+      'div[class*="Next" i]'
+    ];
+    
+    let nextButton = null;
+    for (const selector of pageNavSelectors) {
+      nextButton = await page.$(selector);
+      if (nextButton) {
+        console.log('Found next button with selector:', selector);
+        break;
+      }
+    }
+    
+    if (nextButton) {
+      // Document has multiple pages
+      let pageNumber = 1;
+      let hasNextPage = true;
+      
+      while (hasNextPage) {
+        console.log(`Capturing page ${pageNumber}...`);
+        
+        // Take screenshot of current page
+        const screenshot = await page.screenshot({
+          fullPage: true,
+          type: 'png'
+        });
+        screenshots.push(screenshot);
+        
+        // Try to go to next page
+        try {
+          await nextButton.click();
+          await page.waitForTimeout(2000); // Wait for page transition
+          
+          // Check if we're still on the same page
+          const newNextButton = await page.$(pageNavSelectors[0]);
+          if (!newNextButton || newNextButton === nextButton) {
+            hasNextPage = false;
+          } else {
+            nextButton = newNextButton;
+            pageNumber++;
+          }
+        } catch (error) {
+          console.log('Error navigating to next page:', error);
+          hasNextPage = false;
+        }
+      }
+    } else {
+      // Single page document
+      console.log('Capturing single page document...');
+      const screenshot = await page.screenshot({
+        fullPage: true,
+        type: 'png'
+      });
+      screenshots.push(screenshot);
+    }
+    
+    console.log(`Captured ${screenshots.length} pages successfully`);
+    return screenshots;
   } catch (error) {
-    console.error('Error generating PDF:', error);
+    console.error('Error capturing document:', error);
     throw error;
   } finally {
     await browser.close();
   }
+}
+
+// Function to convert screenshots to PDF
+async function createPDFFromScreenshots(screenshots) {
+  console.log('Creating PDF from screenshots...');
+  
+  // Create a new PDF document
+  const pdfDoc = await PDFDocument.create();
+  
+  // Add each screenshot as a page
+  for (const screenshot of screenshots) {
+    // Convert PNG to JPEG for better PDF compatibility
+    const jpegImage = await pdfDoc.embedJpg(screenshot);
+    
+    // Add a new page with the same dimensions as the image
+    const page = pdfDoc.addPage([jpegImage.width, jpegImage.height]);
+    
+    // Draw the image on the page
+    page.drawImage(jpegImage, {
+      x: 0,
+      y: 0,
+      width: jpegImage.width,
+      height: jpegImage.height,
+    });
+  }
+  
+  // Save the PDF
+  const pdfBytes = await pdfDoc.save();
+  return pdfBytes;
 }
 
 // Handle Slack events directly
@@ -373,9 +445,14 @@ expressApp.post('/slack/events', (req, res) => {
             thread_ts: event.thread_ts || event.ts
           }).catch(console.error);
           
-          // Convert to PDF and send to Slack
+          // Convert to screenshots and create PDF
           convertDocSendToPDF(docsendUrl)
-            .then(async (pdfBuffer) => {
+            .then(async (screenshots) => {
+              console.log(`Captured ${screenshots.length} pages, creating PDF...`);
+              
+              // Create PDF from screenshots
+              const pdfBuffer = await createPDFFromScreenshots(screenshots);
+              
               // Upload PDF to Slack
               const result = await app.client.files.upload({
                 channels: event.channel,
@@ -391,7 +468,7 @@ expressApp.post('/slack/events', (req, res) => {
               console.error('Error processing DocSend:', error);
               await app.client.chat.postMessage({
                 channel: event.channel,
-                text: `Sorry, I couldn't convert the DocSend document to PDF. Error: ${error.message}`,
+                text: `Sorry, I couldn't convert the DocSend document. Error: ${error.message}`,
                 thread_ts: event.thread_ts || event.ts
               });
             });
