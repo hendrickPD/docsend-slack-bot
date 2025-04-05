@@ -285,8 +285,15 @@ async function convertDocSendToPDF(url) {
         // Take screenshot of current page
         const screenshot = await page.screenshot({
           fullPage: true,
-          type: 'png'
+          type: 'png',
+          encoding: 'binary'
         });
+        
+        // Verify screenshot is valid
+        if (!screenshot || screenshot.length === 0) {
+          throw new Error(`Failed to capture screenshot for page ${pageNumber}`);
+        }
+        
         screenshots.push(screenshot);
         
         // Try to go to next page
@@ -320,8 +327,15 @@ async function convertDocSendToPDF(url) {
       console.log('Capturing single page document...');
       const screenshot = await page.screenshot({
         fullPage: true,
-        type: 'png'
+        type: 'png',
+        encoding: 'binary'
       });
+      
+      // Verify screenshot is valid
+      if (!screenshot || screenshot.length === 0) {
+        throw new Error('Failed to capture screenshot for single page document');
+      }
+      
       screenshots.push(screenshot);
     }
     
