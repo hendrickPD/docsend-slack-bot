@@ -6,4 +6,4 @@ set -o errexit
 export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 
 # Install Node.js dependencies
-npm install 
+npm install --legacy-peer-deps 
