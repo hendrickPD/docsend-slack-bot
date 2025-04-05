@@ -162,6 +162,11 @@ async function convertDocSendToPDF(url) {
       'input[type="text"]'
     ];
     
+    // Wait for the page to load completely
+    console.log('Waiting for page to load...');
+    await page.waitForNavigation({ waitUntil: 'networkidle2' });
+    
+    // Try to find the form in the main page first
     let emailForm = null;
     for (const selector of emailSelectors) {
       emailForm = await page.$(selector);
@@ -171,139 +176,118 @@ async function convertDocSendToPDF(url) {
       }
     }
     
-    if (emailForm) {
-      console.log('Found email authentication form');
+    // If no form found in main page, look for iframe
+    if (!emailForm) {
+      console.log('No form found in main page, looking for iframe...');
       
-      // Get email from environment variable
-      const docsendEmail = process.env.DOCSEND_EMAIL;
-      if (!docsendEmail) {
-        throw new Error('DOCSEND_EMAIL environment variable is not set');
-      }
+      // Wait for iframes to load
+      await page.waitForTimeout(5000);
       
-      // Enter email and submit form using multiple methods
-      console.log('Entering email and submitting form...');
+      // Get all frames
+      const frames = page.frames();
+      console.log(`Found ${frames.length} frames`);
       
-      // Method 1: Direct form submission
-      try {
-        await page.evaluate((email, selector) => {
-          const input = document.querySelector(selector);
-          if (input) {
-            input.value = email;
-            const form = input.closest('form');
-            if (form) {
-              form.submit();
-              return true;
-            }
-          }
-          return false;
-        }, docsendEmail, emailSelectors[0]);
-        
-        console.log('Attempted direct form submission');
-      } catch (error) {
-        console.log('Direct form submission failed:', error);
-      }
-      
-      // Method 2: Click submit button
-      try {
-        const submitSelectors = [
-          'button[type="submit"]',
-          'input[type="submit"]',
-          'button[class*="submit"]',
-          'button[class*="continue"]',
-          'input[class*="submit"]',
-          'input[class*="continue"]',
-          'button[class*="button"]',
-          'input[class*="button"]',
-          'button[class*="btn"]',
-          'input[class*="btn"]',
-          'button[class*="primary"]',
-          'input[class*="primary"]',
-          'button[class*="action"]',
-          'input[class*="action"]'
-        ];
-        
-        for (const selector of submitSelectors) {
-          try {
-            const submitButton = await page.$(selector);
-            if (submitButton) {
-              // Get button text for logging
-              const buttonText = await page.evaluate(el => el.textContent || el.value || '', submitButton);
-              console.log('Found submit button with selector:', selector, 'text:', buttonText);
-              
-              // Click the button
-              await submitButton.click();
-              console.log('Clicked submit button');
-              break;
-            }
-          } catch (error) {
-            console.log('Failed to click button with selector:', selector, error);
-          }
-        }
-      } catch (error) {
-        console.log('Submit button click failed:', error);
-      }
-      
-      // Method 3: Press Enter key
-      try {
-        await page.keyboard.press('Enter');
-        console.log('Pressed Enter key');
-      } catch (error) {
-        console.log('Enter key press failed:', error);
-      }
-      
-      // Wait for navigation after form submission
-      console.log('Waiting for navigation after form submission...');
-      try {
-        await page.waitForNavigation({ 
-          waitUntil: ['networkidle0', 'domcontentloaded'],
-          timeout: 30000 
-        });
-        console.log('Navigation completed');
-      } catch (error) {
-        console.log('Navigation timeout, continuing anyway:', error);
-      }
-      
-      // Wait for document to load
-      console.log('Waiting for document to load...');
-      await page.waitForTimeout(10000);
-      
-      // Check if we're still on the email form
-      const stillOnEmailForm = await page.$(emailSelectors[0]);
-      if (stillOnEmailForm) {
-        // Take a screenshot for debugging
-        const screenshot = await page.screenshot({ fullPage: true });
-        console.log('Still on email form, took screenshot for debugging');
-        
-        // Try one more time with a different approach
+      // Find the frame containing the email form
+      let targetFrame = null;
+      for (const frame of frames) {
         try {
-          await page.evaluate(() => {
-            const form = document.querySelector('form');
-            if (form) {
-              form.submit();
-              return true;
-            }
-            return false;
-          });
-          console.log('Attempted final form submission');
+          console.log('Checking frame:', frame.url());
           
-          // Wait again
-          await page.waitForTimeout(5000);
+          // Check if this frame has the email form
+          for (const selector of emailSelectors) {
+            try {
+              const element = await frame.$(selector);
+              if (element) {
+                console.log('Found email form in frame with selector:', selector);
+                targetFrame = frame;
+                break;
+              }
+            } catch (error) {
+              console.log('Error checking selector in frame:', error);
+            }
+          }
+          
+          if (targetFrame) break;
         } catch (error) {
-          console.log('Final form submission failed:', error);
-        }
-        
-        // Check one last time
-        const stillOnForm = await page.$(emailSelectors[0]);
-        if (stillOnForm) {
-          throw new Error('Failed to submit email form - still on email form page after multiple attempts');
+          console.log('Error checking frame:', error);
         }
       }
       
-      // Check for error messages
-      const errorMessage = await page.$('.error-message, .alert, .message');
-      if (errorMessage) {
-        const errorText = await page.evaluate(el => el.textContent, errorMessage);
-        throw new Error(`Authentication error: ${errorText}`);
+      if (targetFrame) {
+        console.log('Found target frame, attempting form submission...');
+        
+        // Get email from environment variable
+        const docsendEmail = process.env.DOCSEND_EMAIL;
+        if (!docsendEmail) {
+          throw new Error('DOCSEND_EMAIL environment variable is not set');
+        }
+        
+        // Enter email and submit form
+        try {
+          // Wait for and fill email input
+          await targetFrame.waitForSelector('input[type="email"]', { timeout: 10000 });
+          await targetFrame.type('input[type="email"]', docsendEmail);
+          console.log('Entered email in iframe');
+          
+          // Try to find and click submit button
+          const submitSelectors = [
+            'button[type="submit"]',
+            'input[type="submit"]',
+            'button[class*="submit"]',
+            'button[class*="continue"]',
+            'input[class*="submit"]',
+            'input[class*="continue"]',
+            'button[class*="button"]',
+            'input[class*="button"]',
+            'button[class*="btn"]',
+            'input[class*="btn"]',
+            'button[class*="primary"]',
+            'input[class*="primary"]',
+            'button[class*="action"]',
+            'input[class*="action"]'
+          ];
+          
+          let submitted = false;
+          for (const selector of submitSelectors) {
+            try {
+              const submitButton = await targetFrame.$(selector);
+              if (submitButton) {
+                // Get button text for logging
+                const buttonText = await targetFrame.evaluate(el => el.textContent || el.value || '', submitButton);
+                console.log('Found submit button in iframe with selector:', selector, 'text:', buttonText);
+                
+                // Click the button
+                await submitButton.click();
+                console.log('Clicked submit button in iframe');
+                submitted = true;
+                break;
+              }
+            } catch (error) {
+              console.log('Failed to click button in iframe with selector:', selector, error);
+            }
+          }
+          
+          if (!submitted) {
+            // Try pressing Enter as fallback
+            await targetFrame.keyboard.press('Enter');
+            console.log('Pressed Enter in iframe');
+          }
+          
+          // Wait for navigation
+          console.log('Waiting for navigation after iframe form submission...');
+          await page.waitForNavigation({ 
+            waitUntil: ['networkidle0', 'domcontentloaded'],
+            timeout: 30000 
+          });
+          console.log('Navigation completed after iframe form submission');
+          
+        } catch (error) {
+          console.log('Error submitting form in iframe:', error);
+          throw error;
+        }
+      } else {
+        console.log('No iframe with email form found');
+        throw new Error('Could not find email form in main page or iframes');
       }
     }
     
