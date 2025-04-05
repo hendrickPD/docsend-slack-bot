@@ -823,50 +823,57 @@ async function createPDFFromScreenshots(screenshots) {
   const pdfDoc = await PDFDocument.create();
   
   for (let i = 0; i < screenshots.length; i++) {
+    console.log(`Processing screenshot ${i + 1} of ${screenshots.length}...`);
+    
+    // Validate screenshot buffer
+    if (!screenshots[i] || !Buffer.isBuffer(screenshots[i]) || screenshots[i].length === 0) {
+      throw new Error(`Invalid screenshot buffer for page ${i + 1}`);
+    }
+    console.log(`Screenshot ${i + 1} buffer size: ${screenshots[i].length} bytes`);
+    
     try {
-      console.log(`Processing screenshot ${i + 1} of ${screenshots.length}...`);
+      // Load the PNG image
+      const pngImage = await pdfDoc.embedPng(screenshots[i]);
+      console.log(`Successfully loaded PNG image ${i + 1}, dimensions: ${pngImage.width}x${pngImage.height}`);
       
-      // First try to embed as PNG
-      try {
-        const pngImage = await pdfDoc.embedPng(screenshots[i]);
-        const page = pdfDoc.addPage([pngImage.width, pngImage.height]);
-        page.drawImage(pngImage, {
-          x: 0,
-          y: 0,
-          width: pngImage.width,
-          height: pngImage.height,
-        });
-        console.log(`Successfully added page ${i + 1} as PNG`);
-        continue;
-      } catch (pngError) {
-        console.log(`Failed to embed as PNG, trying JPEG: ${pngError.message}`);
-      }
+      // Add a new page with the same dimensions as the image
+      const page = pdfDoc.addPage([pngImage.width, pngImage.height]);
       
-      // If PNG fails, try JPEG
-      try {
-        const jpegImage = await pdfDoc.embedJpg(screenshots[i]);
-        const page = pdfDoc.addPage([jpegImage.width, jpegImage.height]);
-        page.drawImage(jpegImage, {
-          x: 0,
-          y: 0,
-          width: jpegImage.width,
-          height: jpegImage.height,
-        });
-        console.log(`Successfully added page ${i + 1} as JPEG`);
-      } catch (jpegError) {
-        console.error(`Failed to embed page ${i + 1} as JPEG: ${jpegError.message}`);
-        throw new Error(`Failed to process screenshot ${i + 1}: ${jpegError.message}`);
-      }
+      // Draw the image on the page
+      page.drawImage(pngImage, {
+        x: 0,
+        y: 0,
+        width: pngImage.width,
+        height: pngImage.height,
+      });
+      
+      console.log(`Successfully added page ${i + 1} as PNG`);
     } catch (error) {
       console.error(`Error processing screenshot ${i + 1}:`, error);
-      throw error;
+      throw new Error(`Failed to process screenshot ${i + 1}: ${error.message}`);
     }
   }
   
   console.log('Saving PDF...');
-  const pdfBytes = await pdfDoc.save();
-  console.log('PDF created successfully');
-  return pdfBytes;
+  try {
+    const pdfBytes = await pdfDoc.save();
+    console.log('PDF created successfully, size:', pdfBytes.length, 'bytes');
+    
+    // Validate PDF buffer
+    if (!pdfBytes || !Buffer.isBuffer(pdfBytes) || pdfBytes.length === 0) {
+      throw new Error('Generated PDF buffer is invalid or empty');
+    }
+    
+    // Additional validation - check if it's a valid PDF
+    if (pdfBytes.length < 100 || !pdfBytes.toString('utf8', 0, 5).includes('%PDF-')) {
+      throw new Error('Generated PDF buffer does not contain valid PDF data');
+    }
+    
+    return pdfBytes;
+  } catch (error) {
+    console.error('Error saving PDF:', error);
+    throw new Error(`Failed to save PDF: ${error.message}`);
+  }
 }
 
 // Handle Slack events directly
