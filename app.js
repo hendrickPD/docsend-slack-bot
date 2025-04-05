@@ -10,12 +10,10 @@ const express = require('express');
 const expressApp = express();
 const port = process.env.PORT || 10000;
 
-// Initialize Slack app with Socket Mode
+// Initialize Slack app
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
-  socketMode: true,
-  appToken: process.env.SLACK_APP_TOKEN
+  signingSecret: process.env.SLACK_SIGNING_SECRET
 });
 
 // Function to extract password from DocSend URL
@@ -165,8 +163,8 @@ const server = expressApp.listen(port, () => {
 // Start the Slack app
 (async () => {
   try {
-    await app.start();
-    console.log('⚡️ Bolt app is running with Socket Mode!');
+    await app.start(port);
+    console.log('⚡️ Bolt app is running!');
   } catch (error) {
     console.error('Error starting Slack app:', error);
     server.close();
