@@ -5,7 +5,22 @@ const crypto = require('crypto');
 
 // Initialize Express app
 const expressApp = express();
-expressApp.use(express.json());
+
+// Add raw body parser middleware
+expressApp.use((req, res, next) => {
+  req.rawBody = '';
+  req.on('data', chunk => {
+    req.rawBody += chunk;
+  });
+  req.on('end', () => {
+    try {
+      req.body = JSON.parse(req.rawBody);
+    } catch (e) {
+      req.body = {};
+    }
+    next();
+  });
+});
 
 // Add request logging middleware
 expressApp.use((req, res, next) => {
@@ -33,15 +48,24 @@ const verifySlackRequest = (req) => {
   
   // Verify request is not older than 5 minutes
   if (Math.abs(Date.now() / 1000 - timestamp) > 300) {
+    console.log('Request too old');
     return false;
   }
   
-  const sigBasestring = `v0:${timestamp}:${JSON.stringify(req.body)}`;
+  // Create the signature basestring
+  const sigBasestring = `v0:${timestamp}:${req.rawBody || JSON.stringify(req.body)}`;
+  
+  // Create our signature
   const mySignature = `v0=${crypto
     .createHmac('sha256', process.env.SLACK_SIGNING_SECRET)
     .update(sigBasestring)
     .digest('hex')}`;
     
+  console.log('Verifying signature:', {
+    received: signature,
+    computed: mySignature
+  });
+  
   return crypto.timingSafeEqual(
     Buffer.from(signature),
     Buffer.from(mySignature)
