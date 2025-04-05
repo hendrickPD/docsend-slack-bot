@@ -3,8 +3,7 @@
   "version": "1.0.0",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js",
-    "postinstall": "node node_modules/puppeteer/install.js"
+    "start": "node app.js"
   },
   "keywords": [],
   "author": "",
