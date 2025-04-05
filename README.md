@@ -87,4 +87,39 @@ Feel free to submit issues and enhancement requests!
 
 ## License
 
-MIT License - feel free to use this code in your own projects! 
+MIT License - feel free to use this code in your own projects!
+
+## Testing Locally
+
+To test the bot locally, follow these steps:
+
+1. **Ensure Node.js is Installed:**
+   - Make sure you have Node.js installed on your machine. You can check by running:
+     ```bash
+     node -v
+     ```
+
+2. **Clone the Repository:**
+   - If you haven't already, clone your repository to your local machine:
+     ```bash
+     git clone https://github.com/hendrickPD/docsend-slack-bot.git
+     cd docsend-slack-bot
+     ```
+
+3. **Install Dependencies:**
+   - Run the following command to install all dependencies:
+     ```bash
+     npm install
+     ```
+
+4. **Run the Application:**
+   - Start the application to see if it runs without issues:
+     ```bash
+     npm start
+     ```
+
+5. **Check for Errors:**
+   - Monitor the console output for any errors or warnings.
+
+6. **Test the Bot:**
+   - If the application starts successfully, test the bot by sending a DocSend link in your Slack channel.

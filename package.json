@@ -12,9 +12,10 @@
   "description": "A Slack bot that converts DocSend links to PDFs",
   "dependencies": {
     "@slack/bolt": "^3.17.0",
-    "axios": "^1.6.2",
     "dotenv": "^16.3.1",
-    "express": "^4.21.2",
-    "puppeteer": "^21.5.0"
+    "express": "^4.21.2"
+  },
+  "engines": {
+    "node": ">=14.0.0"
   }
 }
