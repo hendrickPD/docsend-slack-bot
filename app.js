@@ -105,11 +105,30 @@ async function convertDocSendToPDF(url) {
     // Set viewport to ensure proper rendering
     await page.setViewport({ width: 1920, height: 1080 });
     
-    // Navigate to the DocSend URL
-    await page.goto(url, { waitUntil: 'networkidle0' });
+    // Set a longer timeout for navigation
+    await page.setDefaultNavigationTimeout(30000);
     
-    // Wait for the document to load
-    await page.waitForSelector('.document-viewer', { timeout: 10000 });
+    // Navigate to the DocSend URL and wait for network to be idle
+    await page.goto(url, { 
+      waitUntil: ['networkidle0', 'domcontentloaded'],
+      timeout: 30000
+    });
+    
+    // Check for email input form
+    const emailForm = await page.$('input[type="email"]');
+    if (emailForm) {
+      console.log('Found email authentication form');
+      
+      // Enter email and submit
+      await page.type('input[type="email"]', 'viewer@example.com');
+      await page.click('button[type="submit"]');
+      
+      // Wait for the document to load after authentication
+      await page.waitForSelector('.document-viewer', { timeout: 30000 });
+    } else {
+      // If no email form, wait for document viewer directly
+      await page.waitForSelector('.document-viewer', { timeout: 30000 });
+    }
     
     // Generate PDF
     const pdf = await page.pdf({
