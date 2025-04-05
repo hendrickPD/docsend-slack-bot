@@ -437,7 +437,17 @@ async function convertDocSendToPDF(url) {
         'iframe[src*="docsend"]',
         'div[class*="viewer"]',
         'div[class*="document"]',
-        'div[class*="content"]'
+        'div[class*="content"]',
+        // Add more specific DocSend success indicators
+        'div[class*="viewer-container"]',
+        'div[class*="document-viewer"]',
+        'div[class*="preview-container"]',
+        'div[class*="embed-container"]',
+        'div[class*="slides-container"]',
+        'div[class*="pages-container"]',
+        'div[class*="navigation"]',
+        'div[class*="controls"]',
+        'div[class*="toolbar"]'
       ];
       
       // Wait for any success indicator
@@ -490,31 +500,63 @@ async function convertDocSendToPDF(url) {
     for (const selector of contentSelectors) {
       try {
         console.log('Checking for content with selector:', selector);
-        await page.waitForSelector(selector, { timeout: 30000 });
+        const element = await page.waitForSelector(selector, { timeout: 30000 });
         console.log('Found content with selector:', selector);
-        contentFound = true;
         
-        // If it's an iframe, switch to it
         if (selector === 'iframe') {
           console.log('Switching to iframe...');
-          const frame = await page.$(selector);
-          if (frame) {
-            const frameHandle = await frame.contentFrame();
-            if (frameHandle) {
-              console.log('Successfully switched to iframe');
-              await frameHandle.waitForSelector('body', { timeout: 30000 });
+          const frameHandle = await element.contentFrame();
+          if (frameHandle) {
+            console.log('Successfully switched to iframe');
+            // Wait for iframe content to load
+            await frameHandle.waitForSelector('body', { timeout: 30000 });
+            // Check for document content within iframe
+            const iframeContentSelectors = [
+              'div[class*="viewer"]',
+              'div[class*="document"]',
+              'div[class*="content"]',
+              'div[class*="page"]',
+              'div[class*="slide"]'
+            ];
+            
+            for (const iframeSelector of iframeContentSelectors) {
+              try {
+                await frameHandle.waitForSelector(iframeSelector, { timeout: 10000 });
+                console.log('Found document content in iframe with selector:', iframeSelector);
+                contentFound = true;
+                break;
+              } catch (error) {
+                console.log('Iframe content selector not found:', iframeSelector);
+              }
             }
+          }
+        } else {
+          // For non-iframe content, verify it's actually visible
+          const isVisible = await page.evaluate(el => {
+            const style = window.getComputedStyle(el);
+            const rect = el.getBoundingClientRect();
+            return style.display !== 'none' && 
+                   style.visibility !== 'hidden' && 
+                   rect.width > 0 && 
+                   rect.height > 0;
+          }, element);
+          
+          if (isVisible) {
+            console.log('Content is visible and has valid dimensions');
+            contentFound = true;
+          } else {
+            console.log('Content found but not visible or has zero dimensions');
           }
         }
         
-        break;
+        if (contentFound) break;
       } catch (error) {
-        console.log('Selector not found:', selector);
+        console.log('Selector not found or error:', selector, error);
       }
     }
     
     if (!contentFound) {
-      throw new Error('Could not find document content');
+      throw new Error('Could not find document content after checking all selectors');
     }
     
     // Capture screenshots of each page
@@ -556,10 +598,11 @@ async function convertDocSendToPDF(url) {
         });
         
         // Verify screenshot is valid
-        if (!screenshot || screenshot.length === 0) {
+        if (!screenshot || !Buffer.isBuffer(screenshot) || screenshot.length === 0) {
           throw new Error(`Failed to capture screenshot for page ${pageNumber}`);
         }
         
+        console.log('Screenshot captured successfully, size:', screenshot.length, 'bytes');
         screenshots.push(screenshot);
         
         // Try to go to next page
@@ -598,10 +641,11 @@ async function convertDocSendToPDF(url) {
       });
       
       // Verify screenshot is valid
-      if (!screenshot || screenshot.length === 0) {
+      if (!screenshot || !Buffer.isBuffer(screenshot) || screenshot.length === 0) {
         throw new Error('Failed to capture screenshot for single page document');
       }
       
+      console.log('Screenshot captured successfully, size:', screenshot.length, 'bytes');
       screenshots.push(screenshot);
     }
     
@@ -749,17 +793,33 @@ expressApp.post('/slack/events', (req, res) => {
               // Create PDF from screenshots
               const pdfBuffer = await createPDFFromScreenshots(screenshots);
               
-              // Upload PDF to Slack using the newer uploadV2 method
-              const result = await app.client.files.uploadV2({
-                channel_id: event.channel,
-                file: pdfBuffer,
-                filename: 'document.pdf',
-                title: 'DocSend Document',
-                thread_ts: event.thread_ts || event.ts,
-                initial_comment: 'Here is your DocSend document converted to PDF.'
-              });
+              // Verify PDF buffer is valid
+              if (!pdfBuffer || !Buffer.isBuffer(pdfBuffer)) {
+                throw new Error('Invalid PDF buffer generated');
+              }
               
-              console.log('PDF uploaded successfully:', result);
+              console.log('PDF buffer size:', pdfBuffer.length, 'bytes');
+              
+              // Upload PDF to Slack using the newer uploadV2 method
+              try {
+                const result = await app.client.files.uploadV2({
+                  channel_id: event.channel,
+                  file: pdfBuffer,
+                  filename: 'document.pdf',
+                  title: 'DocSend Document',
+                  thread_ts: event.thread_ts || event.ts,
+                  initial_comment: 'Here is your DocSend document converted to PDF.'
+                });
+                
+                console.log('PDF uploaded successfully:', {
+                  file_id: result.file?.id,
+                  permalink: result.file?.permalink,
+                  size: result.file?.size
+                });
+              } catch (uploadError) {
+                console.error('Error uploading PDF:', uploadError);
+                throw new Error(`Failed to upload PDF: ${uploadError.message}`);
+              }
             })
             .catch(async (error) => {
               console.error('Error processing DocSend:', error);
