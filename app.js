@@ -3,7 +3,6 @@ const { App } = require('@slack/bolt');
 const express = require('express');
 const crypto = require('crypto');
 const puppeteer = require('puppeteer');
-const chromium = require('@sparticuz/chromium');
 
 // Initialize Express app
 const expressApp = express();
@@ -90,15 +89,15 @@ const verifySlackRequest = (req) => {
 async function convertDocSendToPDF(url) {
   console.log('Starting PDF conversion for:', url);
   
-  const options = {
-    args: chromium.args,
-    defaultViewport: chromium.defaultViewport,
-    executablePath: await chromium.executablePath,
-    headless: chromium.headless,
-    ignoreHTTPSErrors: true,
-  };
-
-  const browser = await puppeteer.launch(options);
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu'
+    ]
+  });
   
   try {
     const page = await browser.newPage();
