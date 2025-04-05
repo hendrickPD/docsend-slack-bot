@@ -100,7 +100,11 @@ async function convertDocSendToPDF(url) {
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--disable-web-security',
-      '--disable-features=IsolateOrigins,site-per-process'
+      '--disable-features=IsolateOrigins,site-per-process',
+      '--disable-site-isolation-trials',
+      '--disable-features=BlockInsecurePrivateNetworkRequests',
+      '--disable-features=IsolateOrigins',
+      '--disable-site-isolation-trials'
     ]
   });
   
@@ -125,13 +129,15 @@ async function convertDocSendToPDF(url) {
       'Sec-Fetch-Mode': 'navigate',
       'Sec-Fetch-User': '?1',
       'Sec-Fetch-Dest': 'document',
-      'Upgrade-Insecure-Requests': '1'
+      'Upgrade-Insecure-Requests': '1',
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache'
     });
     
     // Navigate to the DocSend URL
     console.log('Navigating to URL...');
     await page.goto(url, { 
-      waitUntil: 'domcontentloaded',
+      waitUntil: ['networkidle0', 'domcontentloaded'],
       timeout: 60000
     });
     
