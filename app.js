@@ -857,19 +857,21 @@ async function createPDFFromScreenshots(screenshots) {
   console.log('Saving PDF...');
   try {
     const pdfBytes = await pdfDoc.save();
-    console.log('PDF created successfully, size:', pdfBytes.length, 'bytes');
+    const pdfBuffer = Buffer.from(pdfBytes);  // Convert Uint8Array to Buffer
+    
+    console.log('PDF created successfully, size:', pdfBuffer.length, 'bytes');
     
     // Validate PDF buffer
-    if (!pdfBytes || !Buffer.isBuffer(pdfBytes) || pdfBytes.length === 0) {
+    if (!pdfBuffer || pdfBuffer.length === 0) {
       throw new Error('Generated PDF buffer is invalid or empty');
     }
     
     // Additional validation - check if it's a valid PDF
-    if (pdfBytes.length < 100 || !pdfBytes.toString('utf8', 0, 5).includes('%PDF-')) {
+    if (pdfBuffer.length < 100 || !pdfBuffer.toString('utf8', 0, 5).includes('%PDF-')) {
       throw new Error('Generated PDF buffer does not contain valid PDF data');
     }
     
-    return pdfBytes;
+    return pdfBuffer;
   } catch (error) {
     console.error('Error saving PDF:', error);
     throw new Error(`Failed to save PDF: ${error.message}`);
