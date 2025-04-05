@@ -478,6 +478,164 @@ async function convertDocSendToPDF(url) {
       // Wait a bit for any dynamic content to load
       await page.waitForTimeout(5000);
       
+      // Check for direct PDF link
+      console.log('Checking for direct PDF link...');
+      const directPdfLink = await page.evaluate(() => {
+        // Look for various types of PDF download links
+        const selectors = [
+          'a[href$=".pdf"]',
+          'a[download]',
+          'a[href*="download"]',
+          'a[href*="pdf"]',
+          'button[onclick*="download"]',
+          'button[onclick*="pdf"]'
+        ];
+        
+        for (const selector of selectors) {
+          const element = document.querySelector(selector);
+          if (element) {
+            // For buttons, try to get the download URL from onclick handler
+            if (element.tagName.toLowerCase() === 'button' && element.onclick) {
+              const onclickText = element.onclick.toString();
+              const urlMatch = onclickText.match(/['"](https?:\/\/[^'"]+)['"]/);
+              if (urlMatch) {
+                return urlMatch[1];
+              }
+            }
+            // For links, get the href
+            return element.href || element.getAttribute('href');
+          }
+        }
+        return null;
+      });
+      
+      if (directPdfLink) {
+        console.log('Direct PDF link found:', directPdfLink);
+        
+        // Download the PDF using node-fetch
+        const fetch = require('node-fetch');
+        try {
+          const response = await fetch(directPdfLink, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (compatible; Bot/1.0)',
+              'Accept': 'application/pdf,application/x-pdf,application/octet-stream',
+              'Referer': url
+            }
+          });
+          
+          if (!response.ok) {
+            throw new Error(`Failed to download PDF: ${response.status} ${response.statusText}`);
+          }
+          
+          const pdfBuffer = await response.buffer();
+          console.log('Direct PDF download successful, size:', pdfBuffer.length, 'bytes');
+          
+          // Verify PDF buffer is valid
+          if (!pdfBuffer || !Buffer.isBuffer(pdfBuffer) || pdfBuffer.length === 0) {
+            throw new Error('Invalid PDF buffer downloaded');
+          }
+          
+          return pdfBuffer;
+        } catch (downloadError) {
+          console.error('Error downloading PDF directly:', downloadError);
+          console.log('Falling back to screenshot capture...');
+        }
+      } else {
+        console.log('No direct PDF link found, proceeding with screenshot capture');
+      }
+      
+      // Continue with screenshot capture if direct download failed or not available
+      console.log('Capturing document pages...');
+      const screenshots = [];
+      
+      // Try to find page navigation elements
+      const pageNavSelectors = [
+        'button[aria-label*="next" i]',
+        'button[aria-label*="Next" i]',
+        'button[class*="next" i]',
+        'button[class*="Next" i]',
+        'div[class*="next" i]',
+        'div[class*="Next" i]'
+      ];
+      
+      let nextButton = null;
+      for (const selector of pageNavSelectors) {
+        nextButton = await page.$(selector);
+        if (nextButton) {
+          console.log('Found next button with selector:', selector);
+          break;
+        }
+      }
+      
+      if (nextButton) {
+        // Document has multiple pages
+        let pageNumber = 1;
+        let hasNextPage = true;
+        
+        while (hasNextPage) {
+          console.log(`Capturing page ${pageNumber}...`);
+          
+          // Take screenshot of current page
+          const screenshot = await page.screenshot({
+            fullPage: true,
+            type: 'png',
+            encoding: 'binary'
+          });
+          
+          // Verify screenshot is valid
+          if (!screenshot || !Buffer.isBuffer(screenshot) || screenshot.length === 0) {
+            throw new Error(`Failed to capture screenshot for page ${pageNumber}`);
+          }
+          
+          console.log('Screenshot captured successfully, size:', screenshot.length, 'bytes');
+          screenshots.push(screenshot);
+          
+          // Try to go to next page
+          try {
+            await page.evaluate((selector) => {
+              const button = document.querySelector(selector);
+              if (button) {
+                button.click();
+                return true;
+              }
+              return false;
+            }, pageNavSelectors[0]);
+            
+            await page.waitForTimeout(2000); // Wait for page transition
+            
+            // Check if we're still on the same page
+            const newNextButton = await page.$(pageNavSelectors[0]);
+            if (!newNextButton || newNextButton === nextButton) {
+              hasNextPage = false;
+            } else {
+              nextButton = newNextButton;
+              pageNumber++;
+            }
+          } catch (error) {
+            console.log('Error navigating to next page:', error);
+            hasNextPage = false;
+          }
+        }
+      } else {
+        // Single page document
+        console.log('Capturing single page document...');
+        const screenshot = await page.screenshot({
+          fullPage: true,
+          type: 'png',
+          encoding: 'binary'
+        });
+        
+        // Verify screenshot is valid
+        if (!screenshot || !Buffer.isBuffer(screenshot) || screenshot.length === 0) {
+          throw new Error('Failed to capture screenshot for single page document');
+        }
+        
+        console.log('Screenshot captured successfully, size:', screenshot.length, 'bytes');
+        screenshots.push(screenshot);
+      }
+      
+      console.log(`Captured ${screenshots.length} pages successfully`);
+      return screenshots;
     } catch (error) {
       console.log('Error submitting form:', error);
       throw error;
