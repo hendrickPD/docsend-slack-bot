@@ -181,13 +181,67 @@ async function convertDocSendToPDF(url) {
         'button'
       ];
       
+      let submitSuccess = false;
       for (const selector of submitSelectors) {
-        const submitButton = await page.$(selector);
-        if (submitButton) {
-          console.log('Found submit button with selector:', selector);
-          await submitButton.click();
-          break;
+        try {
+          console.log('Trying submit button selector:', selector);
+          const submitButton = await page.$(selector);
+          if (submitButton) {
+            console.log('Found submit button with selector:', selector);
+            
+            // Wait for button to be visible and clickable
+            await page.waitForFunction(
+              (sel) => {
+                const button = document.querySelector(sel);
+                return button && button.offsetParent !== null;
+              },
+              { timeout: 5000 },
+              selector
+            );
+            
+            // Try different ways to submit the form
+            try {
+              // Method 1: Direct click
+              await submitButton.click();
+              submitSuccess = true;
+            } catch (clickError) {
+              console.log('Click failed, trying alternative methods...');
+              
+              try {
+                // Method 2: JavaScript click
+                await page.evaluate((sel) => {
+                  const button = document.querySelector(sel);
+                  button.click();
+                }, selector);
+                submitSuccess = true;
+              } catch (jsClickError) {
+                console.log('JavaScript click failed, trying form submit...');
+                
+                try {
+                  // Method 3: Form submit
+                  await page.evaluate(() => {
+                    const form = document.querySelector('form');
+                    if (form) form.submit();
+                  });
+                  submitSuccess = true;
+                } catch (formSubmitError) {
+                  console.log('Form submit failed');
+                }
+              }
+            }
+            
+            if (submitSuccess) {
+              console.log('Form submitted successfully');
+              break;
+            }
+          }
+        } catch (error) {
+          console.log('Error with selector:', selector, error);
         }
+      }
+      
+      if (!submitSuccess) {
+        throw new Error('Failed to submit the email form');
       }
       
       // Wait for a short time after clicking
