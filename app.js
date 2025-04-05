@@ -111,6 +111,9 @@ async function convertDocSendToPDF(url) {
     // Enable console logging
     page.on('console', msg => console.log('Browser console:', msg.text()));
     
+    // Set a realistic user agent
+    await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    
     // Navigate to the DocSend URL and wait for network to be idle
     console.log('Navigating to URL...');
     await page.goto(url, { 
@@ -118,9 +121,28 @@ async function convertDocSendToPDF(url) {
       timeout: 30000
     });
     
-    // Check for email input form
+    // Take a screenshot for debugging
+    await page.screenshot({ path: 'debug.png' });
+    
+    // Check for email input form with multiple possible selectors
     console.log('Checking for email form...');
-    const emailForm = await page.$('input[type="email"]');
+    const emailSelectors = [
+      'input[type="email"]',
+      'input[name="email"]',
+      'input[placeholder*="email" i]',
+      'input[placeholder*="Email" i]',
+      'form input[type="text"]'
+    ];
+    
+    let emailForm = null;
+    for (const selector of emailSelectors) {
+      emailForm = await page.$(selector);
+      if (emailForm) {
+        console.log('Found email form with selector:', selector);
+        break;
+      }
+    }
+    
     if (emailForm) {
       console.log('Found email authentication form');
       
@@ -132,37 +154,53 @@ async function convertDocSendToPDF(url) {
       
       // Enter email and submit
       console.log('Entering email and submitting form...');
-      await page.type('input[type="email"]', docsendEmail);
-      await page.click('button[type="submit"]');
+      await page.type(emailSelectors[0], docsendEmail);
+      
+      // Try different submit button selectors
+      const submitSelectors = [
+        'button[type="submit"]',
+        'button:contains("Continue")',
+        'button:contains("Submit")',
+        'form button',
+        'input[type="submit"]'
+      ];
+      
+      for (const selector of submitSelectors) {
+        const submitButton = await page.$(selector);
+        if (submitButton) {
+          console.log('Found submit button with selector:', selector);
+          await submitButton.click();
+          break;
+        }
+      }
       
       // Wait for navigation after form submission
       console.log('Waiting for navigation after form submission...');
       await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 30000 });
       
+      // Take another screenshot for debugging
+      await page.screenshot({ path: 'debug-after-submit.png' });
+      
       // Check if we're still on the email form
-      const stillOnEmailForm = await page.$('input[type="email"]');
+      const stillOnEmailForm = await page.$(emailSelectors[0]);
       if (stillOnEmailForm) {
         throw new Error('Authentication failed. Still on email form after submission.');
       }
-      
-      // Wait for either the document viewer or an error message
-      console.log('Waiting for document viewer...');
-      await Promise.race([
-        page.waitForSelector('.document-viewer', { timeout: 30000 }),
-        page.waitForSelector('.error-message', { timeout: 30000 }),
-        page.waitForSelector('iframe', { timeout: 30000 })
-      ]);
-      
-      // Check for error messages
-      const errorMessage = await page.$('.error-message');
-      if (errorMessage) {
-        const errorText = await page.evaluate(el => el.textContent, errorMessage);
-        throw new Error(`Authentication error: ${errorText}`);
-      }
-    } else {
-      console.log('No email form found, waiting for document viewer...');
-      // If no email form, wait for document viewer directly
-      await page.waitForSelector('.document-viewer', { timeout: 30000 });
+    }
+    
+    // Wait for either the document viewer or an error message
+    console.log('Waiting for document viewer...');
+    await Promise.race([
+      page.waitForSelector('.document-viewer', { timeout: 30000 }),
+      page.waitForSelector('.error-message', { timeout: 30000 }),
+      page.waitForSelector('iframe', { timeout: 30000 })
+    ]);
+    
+    // Check for error messages
+    const errorMessage = await page.$('.error-message');
+    if (errorMessage) {
+      const errorText = await page.evaluate(el => el.textContent, errorMessage);
+      throw new Error(`Authentication error: ${errorText}`);
     }
     
     // Generate PDF
