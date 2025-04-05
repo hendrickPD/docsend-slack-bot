@@ -104,7 +104,8 @@ async function convertDocSendToPDF(url) {
       '--disable-site-isolation-trials',
       '--disable-features=BlockInsecurePrivateNetworkRequests',
       '--disable-features=IsolateOrigins',
-      '--disable-site-isolation-trials'
+      '--disable-site-isolation-trials',
+      '--disable-blink-features=AutomationControlled'
     ]
   });
   
@@ -133,6 +134,12 @@ async function convertDocSendToPDF(url) {
       'Cache-Control': 'no-cache',
       'Pragma': 'no-cache'
     });
+    
+    // Bypass CSP
+    await page.setBypassCSP(true);
+    
+    // Set JavaScript enabled
+    await page.setJavaScriptEnabled(true);
     
     // Navigate to the DocSend URL
     console.log('Navigating to URL...');
@@ -198,10 +205,28 @@ async function convertDocSendToPDF(url) {
       
       // Method 2: Click submit button
       try {
-        const submitButton = await page.$('button[type="submit"], input[type="submit"], button:contains("Submit"), button:contains("Continue")');
-        if (submitButton) {
-          await submitButton.click();
-          console.log('Clicked submit button');
+        const submitSelectors = [
+          'button[type="submit"]',
+          'input[type="submit"]',
+          'button:contains("Submit")',
+          'button:contains("Continue")',
+          'button[class*="submit"]',
+          'button[class*="continue"]',
+          'input[class*="submit"]',
+          'input[class*="continue"]'
+        ];
+        
+        for (const selector of submitSelectors) {
+          try {
+            const submitButton = await page.$(selector);
+            if (submitButton) {
+              await submitButton.click();
+              console.log('Clicked submit button with selector:', selector);
+              break;
+            }
+          } catch (error) {
+            console.log('Failed to click button with selector:', selector, error);
+          }
         }
       } catch (error) {
         console.log('Submit button click failed:', error);
