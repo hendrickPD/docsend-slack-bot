@@ -237,7 +237,27 @@ async function convertDocSendToPDF(url) {
           '.privacy-banner',
           '.overlay',
           '.modal',
-          '.popup'
+          '.popup',
+          // Add more specific DocSend overlays
+          '[class*="cookie"]',
+          '[class*="banner"]',
+          '[class*="overlay"]',
+          '[class*="modal"]',
+          '[class*="popup"]',
+          '[class*="privacy"]',
+          '[class*="gdpr"]',
+          '[class*="consent"]',
+          '[class*="acceptance"]',
+          // Add data attributes
+          '[data-testid*="cookie"]',
+          '[data-testid*="banner"]',
+          '[data-testid*="overlay"]',
+          '[data-testid*="modal"]',
+          '[data-testid*="popup"]',
+          '[data-testid*="privacy"]',
+          '[data-testid*="gdpr"]',
+          '[data-testid*="consent"]',
+          '[data-testid*="acceptance"]'
         ];
         
         bannerSelectors.forEach(selector => {
@@ -249,80 +269,148 @@ async function convertDocSendToPDF(url) {
         });
       });
       
-      // Wait for continue button to be visible and enabled
-      console.log('Waiting for continue button to be visible and enabled...');
-      const buttonSelectors = [
-        'button[class*="continue"]',
-        'button[type="submit"]',
-        'input[type="submit"]',
-        'button[class*="submit"]',
-        'input[class*="submit"]',
-        'button[class*="button"]',
-        'input[class*="button"]',
-        'button[class*="btn"]',
-        'input[class*="btn"]',
-        'button[class*="primary"]',
-        'input[class*="primary"]',
-        'button[class*="action"]',
-        'input[class*="action"]'
+      // Try finding button by text using XPath first
+      console.log('Trying to find button by text using XPath...');
+      const buttonTexts = [
+        'Continue',
+        'Submit',
+        'View Document',
+        'Access Document',
+        'View',
+        'Access',
+        'Proceed',
+        'Next',
+        'Go'
       ];
       
       let buttonFound = false;
-      for (const selector of buttonSelectors) {
+      for (const text of buttonTexts) {
         try {
-          console.log(`Checking for button with selector: ${selector}`);
-          
-          // Wait for button to be visible
-          await targetFrame.waitForSelector(selector, { 
-            visible: true,
-            timeout: 10000 
-          });
-          console.log(`Found visible button with selector: ${selector}`);
-          
-          // Wait for button to be enabled
-          await targetFrame.waitForFunction(
-            (sel) => {
-              const button = document.querySelector(sel);
-              return button && !button.disabled;
-            },
-            { timeout: 10000 },
-            selector
-          );
-          console.log(`Button is enabled: ${selector}`);
-          
-          // Scroll button into view and click
-          const clicked = await targetFrame.evaluate((sel) => {
-            const button = document.querySelector(sel);
-            if (button) {
-              // Scroll into view
-              button.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              
-              // Try multiple click methods
-              try {
-                button.click();
-                console.log('Clicked button using click()');
-                return true;
-              } catch (e) {
-                console.log('Click() failed, trying dispatchEvent...');
-                button.dispatchEvent(new MouseEvent('click', {
+          const [button] = await targetFrame.$x(`//button[contains(., '${text}')] | //input[@type='submit' and contains(@value, '${text}')]`);
+          if (button) {
+            console.log(`Found button with text: ${text}`);
+            
+            // Scroll button into view
+            await targetFrame.evaluate(el => {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, button);
+            
+            // Try multiple click methods
+            try {
+              await button.click();
+              console.log('Clicked button using click()');
+              buttonFound = true;
+              break;
+            } catch (e) {
+              console.log('Click() failed, trying dispatchEvent...');
+              await targetFrame.evaluate(el => {
+                el.dispatchEvent(new MouseEvent('click', {
                   bubbles: true,
                   cancelable: true,
                   view: window
                 }));
-                console.log('Clicked button using dispatchEvent');
-                return true;
-              }
+              }, button);
+              console.log('Clicked button using dispatchEvent');
+              buttonFound = true;
+              break;
             }
-            return false;
-          }, selector);
-          
-          if (clicked) {
-            console.log(`Successfully clicked button with selector: ${selector}`);
-            buttonFound = true;
-            break;
           }
         } catch (error) {
-          console.log(`Button not found or not clickable with selector: ${selector}`, error);
+          console.log(`No button found with text: ${text}`);
+        }
+      }
+      
+      // If XPath search failed, try CSS selectors
+      if (!buttonFound) {
+        console.log('XPath search failed, trying CSS selectors...');
+        const buttonSelectors = [
+          'button[class*="continue"]',
+          'button[type="submit"]',
+          'input[type="submit"]',
+          'button[class*="submit"]',
+          'input[class*="submit"]',
+          'button[class*="button"]',
+          'input[class*="button"]',
+          'button[class*="btn"]',
+          'input[class*="btn"]',
+          'button[class*="primary"]',
+          'input[class*="primary"]',
+          'button[class*="action"]',
+          'input[class*="action"]',
+          // Add more specific DocSend selectors
+          'button[class*="docsend"]',
+          'button[class*="viewer"]',
+          'button[class*="document"]',
+          'button[class*="access"]',
+          'button[class*="proceed"]',
+          'button[class*="next"]',
+          'button[class*="go"]',
+          // Add data attributes
+          'button[data-testid*="submit"]',
+          'button[data-testid*="continue"]',
+          'button[data-testid*="view"]',
+          'button[data-testid*="access"]',
+          'button[data-testid*="proceed"]',
+          'button[data-testid*="next"]',
+          'button[data-testid*="go"]'
+        ];
+        
+        for (const selector of buttonSelectors) {
+          try {
+            console.log(`Checking for button with selector: ${selector}`);
+            
+            // Wait for button to be visible
+            await targetFrame.waitForSelector(selector, { 
+              visible: true,
+              timeout: 10000 
+            });
+            console.log(`Found visible button with selector: ${selector}`);
+            
+            // Wait for button to be enabled
+            await targetFrame.waitForFunction(
+              (sel) => {
+                const button = document.querySelector(sel);
+                return button && !button.disabled;
+              },
+              { timeout: 10000 },
+              selector
+            );
+            console.log(`Button is enabled: ${selector}`);
+            
+            // Scroll button into view and click
+            const clicked = await targetFrame.evaluate((sel) => {
+              const button = document.querySelector(sel);
+              if (button) {
+                // Scroll into view
+                button.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                
+                // Try multiple click methods
+                try {
+                  button.click();
+                  console.log('Clicked button using click()');
+                  return true;
+                } catch (e) {
+                  console.log('Click() failed, trying dispatchEvent...');
+                  button.dispatchEvent(new MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                  }));
+                  console.log('Clicked button using dispatchEvent');
+                  return true;
+                }
+              }
+              return false;
+            }, selector);
+            
+            if (clicked) {
+              console.log(`Successfully clicked button with selector: ${selector}`);
+              buttonFound = true;
+              break;
+            }
+          } catch (error) {
+            console.log(`Button not found or not clickable with selector: ${selector}`, error);
+          }
         }
       }
       
