@@ -208,20 +208,31 @@ async function convertDocSendToPDF(url) {
         const submitSelectors = [
           'button[type="submit"]',
           'input[type="submit"]',
-          'button:contains("Submit")',
-          'button:contains("Continue")',
           'button[class*="submit"]',
           'button[class*="continue"]',
           'input[class*="submit"]',
-          'input[class*="continue"]'
+          'input[class*="continue"]',
+          'button[class*="button"]',
+          'input[class*="button"]',
+          'button[class*="btn"]',
+          'input[class*="btn"]',
+          'button[class*="primary"]',
+          'input[class*="primary"]',
+          'button[class*="action"]',
+          'input[class*="action"]'
         ];
         
         for (const selector of submitSelectors) {
           try {
             const submitButton = await page.$(selector);
             if (submitButton) {
+              // Get button text for logging
+              const buttonText = await page.evaluate(el => el.textContent || el.value || '', submitButton);
+              console.log('Found submit button with selector:', selector, 'text:', buttonText);
+              
+              // Click the button
               await submitButton.click();
-              console.log('Clicked submit button with selector:', selector);
+              console.log('Clicked submit button');
               break;
             }
           } catch (error) {
@@ -262,7 +273,30 @@ async function convertDocSendToPDF(url) {
         // Take a screenshot for debugging
         const screenshot = await page.screenshot({ fullPage: true });
         console.log('Still on email form, took screenshot for debugging');
-        throw new Error('Failed to submit email form - still on email form page');
+        
+        // Try one more time with a different approach
+        try {
+          await page.evaluate(() => {
+            const form = document.querySelector('form');
+            if (form) {
+              form.submit();
+              return true;
+            }
+            return false;
+          });
+          console.log('Attempted final form submission');
+          
+          // Wait again
+          await page.waitForTimeout(5000);
+        } catch (error) {
+          console.log('Final form submission failed:', error);
+        }
+        
+        // Check one last time
+        const stillOnForm = await page.$(emailSelectors[0]);
+        if (stillOnForm) {
+          throw new Error('Failed to submit email form - still on email form page after multiple attempts');
+        }
       }
       
       // Check for error messages
