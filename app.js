@@ -107,13 +107,40 @@ expressApp.post('/slack/events', (req, res) => {
   res.status(200).send();
   
   // Process the event asynchronously
-  if (req.body.event && req.body.event.type === 'message') {
-    const message = req.body.event;
+  if (req.body.event) {
+    const event = req.body.event;
     
-    // Check if the message contains a DocSend link
-    if (message.text && message.text.includes('docsend.com')) {
-      console.log('Found DocSend link:', message.text);
-      // TODO: Add your DocSend processing logic here
+    // Handle different message types
+    if (event.type === 'message') {
+      let messageText = '';
+      
+      // Get message text based on event type
+      if (event.subtype === 'message_deleted') {
+        messageText = event.previous_message?.text || '';
+      } else if (event.subtype === 'message_changed') {
+        messageText = event.message?.text || '';
+      } else {
+        messageText = event.text || '';
+      }
+      
+      // Check if the message contains a DocSend link
+      if (messageText && messageText.includes('docsend.com')) {
+        console.log('Found DocSend link:', messageText);
+        
+        // Extract DocSend URL
+        const docsendUrl = messageText.match(/https:\/\/docsend\.com\/view\/[a-zA-Z0-9]+/)?.[0];
+        if (docsendUrl) {
+          console.log('Extracted DocSend URL:', docsendUrl);
+          
+          // TODO: Add your DocSend processing logic here
+          // For now, just send a confirmation message
+          app.client.chat.postMessage({
+            channel: event.channel,
+            text: `I found a DocSend link: ${docsendUrl}`,
+            thread_ts: event.thread_ts || event.ts
+          }).catch(console.error);
+        }
+      }
     }
   }
 });
