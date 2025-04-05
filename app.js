@@ -30,9 +30,12 @@ expressApp.use((req, res, next) => {
   next();
 });
 
-// Health check endpoint
+// Health check endpoint (handles both GET and HEAD)
 expressApp.get('/', (req, res) => {
   res.send('DocSend to PDF Slack Bot is running!');
+});
+expressApp.head('/', (req, res) => {
+  res.status(200).end();
 });
 
 // Initialize Slack app
@@ -45,6 +48,11 @@ const app = new App({
 const verifySlackRequest = (req) => {
   const timestamp = req.headers['x-slack-request-timestamp'];
   const signature = req.headers['x-slack-signature'];
+  
+  if (!timestamp || !signature) {
+    console.log('Missing Slack signature headers');
+    return false;
+  }
   
   // Verify request is not older than 5 minutes
   if (Math.abs(Date.now() / 1000 - timestamp) > 300) {
@@ -63,7 +71,8 @@ const verifySlackRequest = (req) => {
     
   console.log('Verifying signature:', {
     received: signature,
-    computed: mySignature
+    computed: mySignature,
+    basestring: sigBasestring
   });
   
   return crypto.timingSafeEqual(
