@@ -226,15 +226,13 @@ async function convertDocSendToPDF(url) {
       await targetFrame.type('input[type="email"]', docsendEmail);
       console.log('Entered email in form');
       
-      // Hide cookie banner and force click submit button
-      console.log('Hiding cookie banner and forcing submit button click...');
+      // Hide cookie banners and overlays
+      console.log('Hiding cookie banners and overlays...');
       await targetFrame.evaluate(() => {
-        // Hide cookie banners and overlays
-        const overlays = [
-          '.cookie-acceptance',
+        const bannerSelectors = [
           '.cookie-banner',
-          '.cookie-notice',
           '.cookie-consent',
+          '.cookie-acceptance',
           '.gdpr-banner',
           '.privacy-banner',
           '.overlay',
@@ -242,14 +240,18 @@ async function convertDocSendToPDF(url) {
           '.popup'
         ];
         
-        overlays.forEach(selector => {
-          const element = document.querySelector(selector);
-          if (element) {
+        bannerSelectors.forEach(selector => {
+          const elements = document.querySelectorAll(selector);
+          elements.forEach(element => {
             element.style.display = 'none';
-            console.log('Hidden overlay:', selector);
-          }
+            console.log(`Hidden ${selector}`);
+          });
         });
-        
+      });
+      
+      // Hide cookie banner and force click submit button
+      console.log('Hiding cookie banner and forcing submit button click...');
+      await targetFrame.evaluate(() => {
         // Find and click submit button
         const submitSelectors = [
           'button[type="submit"]',
