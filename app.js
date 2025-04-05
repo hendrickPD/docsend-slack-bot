@@ -249,52 +249,86 @@ async function convertDocSendToPDF(url) {
         });
       });
       
-      // Hide cookie banner and force click submit button
-      console.log('Hiding cookie banner and forcing submit button click...');
-      await targetFrame.evaluate(() => {
-        // Find and click submit button
-        const submitSelectors = [
-          'button[type="submit"]',
-          'input[type="submit"]',
-          'button[class*="submit"]',
-          'button[class*="continue"]',
-          'input[class*="submit"]',
-          'input[class*="continue"]',
-          'button[class*="button"]',
-          'input[class*="button"]',
-          'button[class*="btn"]',
-          'input[class*="btn"]',
-          'button[class*="primary"]',
-          'input[class*="primary"]',
-          'button[class*="action"]',
-          'input[class*="action"]'
-        ];
-        
-        for (const selector of submitSelectors) {
-          const button = document.querySelector(selector);
-          if (button) {
-            console.log('Found submit button with selector:', selector);
-            
-            // Try multiple click methods
-            try {
-              button.click();
-              console.log('Clicked button using click()');
-              return true;
-            } catch (e) {
-              console.log('Click() failed, trying dispatchEvent...');
-              button.dispatchEvent(new MouseEvent('click', {
-                bubbles: true,
-                cancelable: true,
-                view: window
-              }));
-              console.log('Clicked button using dispatchEvent');
-              return true;
+      // Wait for continue button to be visible and enabled
+      console.log('Waiting for continue button to be visible and enabled...');
+      const buttonSelectors = [
+        'button[class*="continue"]',
+        'button[type="submit"]',
+        'input[type="submit"]',
+        'button[class*="submit"]',
+        'input[class*="submit"]',
+        'button[class*="button"]',
+        'input[class*="button"]',
+        'button[class*="btn"]',
+        'input[class*="btn"]',
+        'button[class*="primary"]',
+        'input[class*="primary"]',
+        'button[class*="action"]',
+        'input[class*="action"]'
+      ];
+      
+      let buttonFound = false;
+      for (const selector of buttonSelectors) {
+        try {
+          console.log(`Checking for button with selector: ${selector}`);
+          
+          // Wait for button to be visible
+          await targetFrame.waitForSelector(selector, { 
+            visible: true,
+            timeout: 10000 
+          });
+          console.log(`Found visible button with selector: ${selector}`);
+          
+          // Wait for button to be enabled
+          await targetFrame.waitForFunction(
+            (sel) => {
+              const button = document.querySelector(sel);
+              return button && !button.disabled;
+            },
+            { timeout: 10000 },
+            selector
+          );
+          console.log(`Button is enabled: ${selector}`);
+          
+          // Scroll button into view and click
+          const clicked = await targetFrame.evaluate((sel) => {
+            const button = document.querySelector(sel);
+            if (button) {
+              // Scroll into view
+              button.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              
+              // Try multiple click methods
+              try {
+                button.click();
+                console.log('Clicked button using click()');
+                return true;
+              } catch (e) {
+                console.log('Click() failed, trying dispatchEvent...');
+                button.dispatchEvent(new MouseEvent('click', {
+                  bubbles: true,
+                  cancelable: true,
+                  view: window
+                }));
+                console.log('Clicked button using dispatchEvent');
+                return true;
+              }
             }
+            return false;
+          }, selector);
+          
+          if (clicked) {
+            console.log(`Successfully clicked button with selector: ${selector}`);
+            buttonFound = true;
+            break;
           }
+        } catch (error) {
+          console.log(`Button not found or not clickable with selector: ${selector}`, error);
         }
-        
-        return false;
-      });
+      }
+      
+      if (!buttonFound) {
+        throw new Error('Could not find or click any submit button');
+      }
       
       // Wait for navigation or content change
       console.log('Waiting for page navigation or content change...');
