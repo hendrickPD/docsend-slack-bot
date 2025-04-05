@@ -31,6 +31,9 @@ expressApp.use((req, res, next) => {
   next();
 });
 
+// Track processed messages to prevent duplicates
+const processedMessages = new Set();
+
 // Health check endpoint (handles both GET and HEAD)
 expressApp.get('/', (req, res) => {
   res.send('DocSend to PDF Slack Bot is running!');
@@ -157,14 +160,18 @@ expressApp.post('/slack/events', (req, res) => {
     // Handle different message types
     if (event.type === 'message') {
       let messageText = '';
+      let messageId = '';
       
-      // Get message text based on event type
+      // Get message text and ID based on event type
       if (event.subtype === 'message_deleted') {
         messageText = event.previous_message?.text || '';
+        messageId = event.previous_message?.client_msg_id || '';
       } else if (event.subtype === 'message_changed') {
         messageText = event.message?.text || '';
+        messageId = event.message?.client_msg_id || '';
       } else {
         messageText = event.text || '';
+        messageId = event.client_msg_id || '';
       }
       
       // Check if the message contains a DocSend link
@@ -175,6 +182,18 @@ expressApp.post('/slack/events', (req, res) => {
         const docsendUrl = messageText.match(/https:\/\/docsend\.com\/view\/[a-zA-Z0-9]+/)?.[0];
         if (docsendUrl) {
           console.log('Extracted DocSend URL:', docsendUrl);
+          
+          // Create a unique key for this message
+          const messageKey = `${messageId}_${docsendUrl}`;
+          
+          // Check if we've already processed this message
+          if (processedMessages.has(messageKey)) {
+            console.log('Message already processed, skipping:', messageKey);
+            return;
+          }
+          
+          // Mark this message as processed
+          processedMessages.add(messageKey);
           
           // Send initial response
           app.client.chat.postMessage({
