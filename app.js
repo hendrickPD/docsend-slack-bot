@@ -281,82 +281,105 @@ async function convertDocSendToPDF(url) {
         try {
           const submitButton = await targetFrame.$(selector);
           if (submitButton) {
-            // Get button text and state for logging
-            const buttonState = await targetFrame.evaluate(el => {
-              const style = window.getComputedStyle(el);
-              const rect = el.getBoundingClientRect();
-              return {
-                text: el.textContent || el.value || '',
-                visible: style.display !== 'none' && style.visibility !== 'hidden',
-                clickable: style.pointerEvents !== 'none',
-                disabled: el.disabled,
-                position: {
-                  top: rect.top,
-                  left: rect.left,
+            // Poll for non-zero dimensions
+            console.log('Polling for button dimensions...');
+            let attempts = 0;
+            let hasValidDimensions = false;
+            
+            while (attempts < 10 && !hasValidDimensions) {
+              const dimensions = await targetFrame.evaluate(el => {
+                const rect = el.getBoundingClientRect();
+                return {
                   width: rect.width,
-                  height: rect.height
-                },
-                computedStyle: {
-                  display: style.display,
-                  visibility: style.visibility,
-                  opacity: style.opacity,
-                  pointerEvents: style.pointerEvents,
-                  position: style.position,
-                  zIndex: style.zIndex
-                }
-              };
-            }, submitButton);
-            
-            console.log('Found submit button with selector:', selector, 'state:', buttonState);
-            
-            // Wait for button to have non-zero dimensions
-            if (buttonState.position.width === 0 || buttonState.position.height === 0) {
-              console.log('Button has zero dimensions, waiting for proper rendering...');
-              await targetFrame.waitForFunction(
-                el => {
-                  const rect = el.getBoundingClientRect();
-                  return rect.width > 0 && rect.height > 0;
-                },
-                { timeout: 10000 },
-                submitButton
-              );
-              console.log('Button now has non-zero dimensions');
-            }
-            
-            // Scroll button into view
-            console.log('Scrolling button into view...');
-            await targetFrame.evaluate(el => {
-              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }, submitButton);
-            await page.waitForTimeout(1000); // Wait for scroll animation
-            
-            // Wait for button to be enabled
-            if (buttonState.disabled) {
-              console.log('Button is disabled, waiting for it to become enabled...');
-              await targetFrame.waitForFunction(
-                el => !el.disabled,
-                { timeout: 10000 },
-                submitButton
-              );
-              console.log('Button is now enabled');
-            }
-            
-            // Try multiple click methods
-            try {
-              // Method 1: Direct click
-              console.log('Attempting direct click...');
-              await submitButton.click();
-            } catch (clickError) {
-              console.log('Direct click failed, trying JavaScript click...');
-              
-              // Method 2: JavaScript click
-              await targetFrame.evaluate(el => {
-                el.dispatchEvent(new MouseEvent('click', {
-                  bubbles: true,
-                  cancelable: true,
-                  view: window
-                }));
+                  height: rect.height,
+                  top: rect.top,
+                  left: rect.left
+                };
               }, submitButton);
+              
+              console.log('Button dimensions attempt', attempts + 1, ':', dimensions);
+              
+              if (dimensions.width > 0 && dimensions.height > 0) {
+                hasValidDimensions = true;
+                console.log('Button has valid dimensions:', dimensions);
+              } else {
+                attempts++;
+                await page.waitForTimeout(1000);
+              }
+            }
+            
+            if (!hasValidDimensions) {
+              console.log('Button still has zero dimensions after polling, trying JavaScript click...');
+              await targetFrame.evaluate(el => {
+                // Try multiple click methods
+                try {
+                  el.click();
+                } catch (e) {
+                  console.log('Direct click failed, trying dispatchEvent...');
+                  el.dispatchEvent(new MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                  }));
+                }
+              }, submitButton);
+            } else {
+              // Get button text and state for logging
+              const buttonState = await targetFrame.evaluate(el => {
+                const style = window.getComputedStyle(el);
+                return {
+                  text: el.textContent || el.value || '',
+                  visible: style.display !== 'none' && style.visibility !== 'hidden',
+                  clickable: style.pointerEvents !== 'none',
+                  disabled: el.disabled,
+                  computedStyle: {
+                    display: style.display,
+                    visibility: style.visibility,
+                    opacity: style.opacity,
+                    pointerEvents: style.pointerEvents,
+                    position: style.position,
+                    zIndex: style.zIndex
+                  }
+                };
+              }, submitButton);
+              
+              console.log('Button state:', buttonState);
+              
+              // Scroll button into view
+              console.log('Scrolling button into view...');
+              await targetFrame.evaluate(el => {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }, submitButton);
+              await page.waitForTimeout(1000);
+              
+              // Wait for button to be enabled
+              if (buttonState.disabled) {
+                console.log('Button is disabled, waiting for it to become enabled...');
+                await targetFrame.waitForFunction(
+                  el => !el.disabled,
+                  { timeout: 10000 },
+                  submitButton
+                );
+                console.log('Button is now enabled');
+              }
+              
+              // Try multiple click methods
+              try {
+                // Method 1: Direct click
+                console.log('Attempting direct click...');
+                await submitButton.click();
+              } catch (clickError) {
+                console.log('Direct click failed, trying JavaScript click...');
+                
+                // Method 2: JavaScript click
+                await targetFrame.evaluate(el => {
+                  el.dispatchEvent(new MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                  }));
+                }, submitButton);
+              }
             }
             
             // Wait for response
@@ -726,13 +749,14 @@ expressApp.post('/slack/events', (req, res) => {
               // Create PDF from screenshots
               const pdfBuffer = await createPDFFromScreenshots(screenshots);
               
-              // Upload PDF to Slack
-              const result = await app.client.files.upload({
-                channels: event.channel,
+              // Upload PDF to Slack using the newer uploadV2 method
+              const result = await app.client.files.uploadV2({
+                channel_id: event.channel,
                 file: pdfBuffer,
                 filename: 'document.pdf',
                 title: 'DocSend Document',
-                thread_ts: event.thread_ts || event.ts
+                thread_ts: event.thread_ts || event.ts,
+                initial_comment: 'Here is your DocSend document converted to PDF.'
               });
               
               console.log('PDF uploaded successfully:', result);
