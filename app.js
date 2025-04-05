@@ -97,7 +97,7 @@ async function convertDocSendToPDF(url) {
       '--disable-dev-shm-usage',
       '--disable-gpu'
     ],
-    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome'
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/opt/render/project/.apt/usr/bin/google-chrome'
   });
   
   try {
