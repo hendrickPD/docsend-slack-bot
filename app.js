@@ -20,12 +20,17 @@ const app = new App({
       path: '/slack/events',
       method: ['POST'],
       handler: (req, res) => {
+        console.log('Received Slack event:', JSON.stringify(req.body));
+        
         // Handle Slack's challenge verification
         if (req.body.type === 'url_verification') {
+          console.log('Handling challenge verification');
           res.json({ challenge: req.body.challenge });
           return;
         }
+        
         // Handle other events
+        console.log('Processing regular event');
         app.processEvent(req.body);
         res.status(200).send();
       }
@@ -37,6 +42,10 @@ const app = new App({
 const port = process.env.PORT || 10000;
 expressApp.listen(port, () => {
   console.log(`Server is running on port ${port}`);
+  console.log('Environment variables:', {
+    hasBotToken: !!process.env.SLACK_BOT_TOKEN,
+    hasSigningSecret: !!process.env.SLACK_SIGNING_SECRET
+  });
 });
 
 // Start the Slack app
