@@ -16,6 +16,17 @@ const app = new App({
   signingSecret: process.env.SLACK_SIGNING_SECRET
 });
 
+// Handle Slack's challenge verification
+expressApp.post('/slack/events', (req, res) => {
+  if (req.body.type === 'url_verification') {
+    res.json({ challenge: req.body.challenge });
+  } else {
+    // Handle other events
+    app.processEvent(req.body);
+    res.status(200).send();
+  }
+});
+
 // Function to extract password from DocSend URL
 function extractPasswordFromUrl(url) {
   const passwordMatch = url.match(/[?&]password=([^&]+)/);
