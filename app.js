@@ -273,13 +273,56 @@ async function convertDocSendToPDF(url) {
             console.log('Pressed Enter in iframe');
           }
           
-          // Wait for navigation
-          console.log('Waiting for navigation after iframe form submission...');
-          await page.waitForNavigation({ 
-            waitUntil: ['networkidle0', 'domcontentloaded'],
-            timeout: 30000 
-          });
-          console.log('Navigation completed after iframe form submission');
+          // Instead of waiting for navigation, wait for success indicators
+          console.log('Waiting for form submission success...');
+          
+          // Define success indicators
+          const successIndicators = [
+            '.submission-success',
+            '.success-message',
+            '.alert-success',
+            '.message-success',
+            'div[class*="success"]',
+            'div[class*="Success"]',
+            'div[class*="submitted"]',
+            'div[class*="Submitted"]',
+            'div[class*="complete"]',
+            'div[class*="Complete"]',
+            'div[class*="done"]',
+            'div[class*="Done"]',
+            'iframe[src*="docsend"]', // New iframe that might appear after submission
+            'div[class*="viewer"]',   // Document viewer that appears after submission
+            'div[class*="document"]', // Document container that appears after submission
+            'div[class*="content"]'   // Content area that appears after submission
+          ];
+          
+          // Wait for any success indicator
+          let successFound = false;
+          for (const indicator of successIndicators) {
+            try {
+              console.log('Checking for success indicator:', indicator);
+              await targetFrame.waitForSelector(indicator, { timeout: 10000 });
+              console.log('Found success indicator:', indicator);
+              successFound = true;
+              break;
+            } catch (error) {
+              console.log('Success indicator not found:', indicator);
+            }
+          }
+          
+          if (!successFound) {
+            // Check if we're still on the email form
+            const stillOnEmailForm = await targetFrame.$(emailSelectors[0]);
+            if (stillOnEmailForm) {
+              throw new Error('Form submission appears to have failed - still on email form');
+            }
+            
+            // If not on email form, assume success and continue
+            console.log('No success indicators found, but not on email form - assuming success');
+          }
+          
+          // Wait a bit for any dynamic content to load
+          await page.waitForTimeout(5000);
           
         } catch (error) {
           console.log('Error submitting form in iframe:', error);
