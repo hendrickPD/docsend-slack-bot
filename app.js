@@ -295,18 +295,42 @@ async function convertDocSendToPDF(url) {
                   left: rect.left,
                   width: rect.width,
                   height: rect.height
+                },
+                computedStyle: {
+                  display: style.display,
+                  visibility: style.visibility,
+                  opacity: style.opacity,
+                  pointerEvents: style.pointerEvents,
+                  position: style.position,
+                  zIndex: style.zIndex
                 }
               };
             }, submitButton);
             
             console.log('Found submit button with selector:', selector, 'state:', buttonState);
             
-            if (!buttonState.visible) {
-              console.log('Button not visible, scrolling into view...');
-              await targetFrame.evaluate(el => el.scrollIntoView({ behavior: 'smooth', block: 'center' }), submitButton);
-              await page.waitForTimeout(1000); // Wait for scroll animation
+            // Wait for button to have non-zero dimensions
+            if (buttonState.position.width === 0 || buttonState.position.height === 0) {
+              console.log('Button has zero dimensions, waiting for proper rendering...');
+              await targetFrame.waitForFunction(
+                el => {
+                  const rect = el.getBoundingClientRect();
+                  return rect.width > 0 && rect.height > 0;
+                },
+                { timeout: 10000 },
+                submitButton
+              );
+              console.log('Button now has non-zero dimensions');
             }
             
+            // Scroll button into view
+            console.log('Scrolling button into view...');
+            await targetFrame.evaluate(el => {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, submitButton);
+            await page.waitForTimeout(1000); // Wait for scroll animation
+            
+            // Wait for button to be enabled
             if (buttonState.disabled) {
               console.log('Button is disabled, waiting for it to become enabled...');
               await targetFrame.waitForFunction(
@@ -314,12 +338,8 @@ async function convertDocSendToPDF(url) {
                 { timeout: 10000 },
                 submitButton
               );
+              console.log('Button is now enabled');
             }
-            
-            // Hover over the button first
-            console.log('Hovering over button...');
-            await submitButton.hover();
-            await page.waitForTimeout(500);
             
             // Try multiple click methods
             try {
@@ -331,7 +351,11 @@ async function convertDocSendToPDF(url) {
               
               // Method 2: JavaScript click
               await targetFrame.evaluate(el => {
-                el.click();
+                el.dispatchEvent(new MouseEvent('click', {
+                  bubbles: true,
+                  cancelable: true,
+                  view: window
+                }));
               }, submitButton);
             }
             
@@ -351,11 +375,23 @@ async function convertDocSendToPDF(url) {
       if (!submitted) {
         // Try pressing Enter as fallback
         console.log('Trying Enter key as fallback...');
-        await Promise.all([
-          targetFrame.keyboard.press('Enter'),
-          responsePromise
-        ]);
-        console.log('Pressed Enter and received response');
+        
+        // Focus the email input first
+        const emailInput = await targetFrame.$('input[type="email"]');
+        if (emailInput) {
+          console.log('Focusing email input...');
+          await emailInput.focus();
+          await page.waitForTimeout(500);
+          
+          // Press Enter and wait for response
+          await Promise.all([
+            emailInput.press('Enter'),
+            responsePromise
+          ]);
+          console.log('Pressed Enter and received response');
+        } else {
+          throw new Error('Could not find email input for Enter key fallback');
+        }
       }
       
       // Wait for success indicators
