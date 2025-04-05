@@ -102,8 +102,20 @@ expressApp.post('/slack/events', (req, res) => {
   
   // Handle other events
   console.log('Processing regular event');
-  app.processEvent(req.body);
+  
+  // Acknowledge the event immediately
   res.status(200).send();
+  
+  // Process the event asynchronously
+  if (req.body.event && req.body.event.type === 'message') {
+    const message = req.body.event;
+    
+    // Check if the message contains a DocSend link
+    if (message.text && message.text.includes('docsend.com')) {
+      console.log('Found DocSend link:', message.text);
+      // TODO: Add your DocSend processing logic here
+    }
+  }
 });
 
 // Start the Express server
