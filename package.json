@@ -13,8 +13,7 @@
     "@slack/bolt": "^3.17.0",
     "dotenv": "^16.3.1",
     "express": "^4.21.2",
-    "puppeteer-core": "^10.1.0",
-    "chrome-aws-lambda": "^10.1.0"
+    "puppeteer": "^10.1.0"
   },
   "engines": {
     "node": ">=14.0.0"

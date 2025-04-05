@@ -3,7 +3,7 @@
 set -o errexit
 
 # Set Puppeteer environment variables
-export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+export PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=false
 
 # Install Node.js dependencies
 npm install --legacy-peer-deps 
