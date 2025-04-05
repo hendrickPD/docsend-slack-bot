@@ -6,6 +6,14 @@ const express = require('express');
 const expressApp = express();
 expressApp.use(express.json());
 
+// Add request logging middleware
+expressApp.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  console.log('Headers:', req.headers);
+  console.log('Body:', req.body);
+  next();
+});
+
 // Health check endpoint
 expressApp.get('/', (req, res) => {
   res.send('DocSend to PDF Slack Bot is running!');
@@ -25,7 +33,9 @@ const app = new App({
         // Handle Slack's challenge verification
         if (req.body.type === 'url_verification') {
           console.log('Handling challenge verification');
-          res.json({ challenge: req.body.challenge });
+          // Respond with just the challenge value in plaintext
+          res.set('Content-Type', 'text/plain');
+          res.send(req.body.challenge);
           return;
         }
         
