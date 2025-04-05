@@ -281,26 +281,76 @@ async function convertDocSendToPDF(url) {
         try {
           const submitButton = await targetFrame.$(selector);
           if (submitButton) {
-            const buttonText = await targetFrame.evaluate(el => el.textContent || el.value || '', submitButton);
-            console.log('Found submit button with selector:', selector, 'text:', buttonText);
+            // Get button text and state for logging
+            const buttonState = await targetFrame.evaluate(el => {
+              const style = window.getComputedStyle(el);
+              const rect = el.getBoundingClientRect();
+              return {
+                text: el.textContent || el.value || '',
+                visible: style.display !== 'none' && style.visibility !== 'hidden',
+                clickable: style.pointerEvents !== 'none',
+                disabled: el.disabled,
+                position: {
+                  top: rect.top,
+                  left: rect.left,
+                  width: rect.width,
+                  height: rect.height
+                }
+              };
+            }, submitButton);
             
-            // Click the button and wait for response
-            await Promise.all([
-              submitButton.click(),
-              responsePromise
-            ]);
+            console.log('Found submit button with selector:', selector, 'state:', buttonState);
             
-            console.log('Clicked submit button and received response');
+            if (!buttonState.visible) {
+              console.log('Button not visible, scrolling into view...');
+              await targetFrame.evaluate(el => el.scrollIntoView({ behavior: 'smooth', block: 'center' }), submitButton);
+              await page.waitForTimeout(1000); // Wait for scroll animation
+            }
+            
+            if (buttonState.disabled) {
+              console.log('Button is disabled, waiting for it to become enabled...');
+              await targetFrame.waitForFunction(
+                el => !el.disabled,
+                { timeout: 10000 },
+                submitButton
+              );
+            }
+            
+            // Hover over the button first
+            console.log('Hovering over button...');
+            await submitButton.hover();
+            await page.waitForTimeout(500);
+            
+            // Try multiple click methods
+            try {
+              // Method 1: Direct click
+              console.log('Attempting direct click...');
+              await submitButton.click();
+            } catch (clickError) {
+              console.log('Direct click failed, trying JavaScript click...');
+              
+              // Method 2: JavaScript click
+              await targetFrame.evaluate(el => {
+                el.click();
+              }, submitButton);
+            }
+            
+            // Wait for response
+            console.log('Waiting for form submission response...');
+            await responsePromise;
+            
+            console.log('Form submitted successfully');
             submitted = true;
             break;
           }
         } catch (error) {
-          console.log('Failed to click button with selector:', selector, error);
+          console.log('Failed to interact with button using selector:', selector, error);
         }
       }
       
       if (!submitted) {
         // Try pressing Enter as fallback
+        console.log('Trying Enter key as fallback...');
         await Promise.all([
           targetFrame.keyboard.press('Enter'),
           responsePromise
