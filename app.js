@@ -167,27 +167,59 @@ async function convertDocSendToPDF(url) {
         throw new Error('DOCSEND_EMAIL environment variable is not set');
       }
       
-      // Enter email and submit form using JavaScript
+      // Enter email and submit form using multiple methods
       console.log('Entering email and submitting form...');
-      await page.evaluate((email, selector) => {
-        const input = document.querySelector(selector);
-        if (input) {
-          input.value = email;
-          const form = input.closest('form');
-          if (form) {
-            form.submit();
-            return true;
+      
+      // Method 1: Direct form submission
+      try {
+        await page.evaluate((email, selector) => {
+          const input = document.querySelector(selector);
+          if (input) {
+            input.value = email;
+            const form = input.closest('form');
+            if (form) {
+              form.submit();
+              return true;
+            }
           }
+          return false;
+        }, docsendEmail, emailSelectors[0]);
+        
+        console.log('Attempted direct form submission');
+      } catch (error) {
+        console.log('Direct form submission failed:', error);
+      }
+      
+      // Method 2: Click submit button
+      try {
+        const submitButton = await page.$('button[type="submit"], input[type="submit"], button:contains("Submit"), button:contains("Continue")');
+        if (submitButton) {
+          await submitButton.click();
+          console.log('Clicked submit button');
         }
-        return false;
-      }, docsendEmail, emailSelectors[0]);
+      } catch (error) {
+        console.log('Submit button click failed:', error);
+      }
+      
+      // Method 3: Press Enter key
+      try {
+        await page.keyboard.press('Enter');
+        console.log('Pressed Enter key');
+      } catch (error) {
+        console.log('Enter key press failed:', error);
+      }
       
       // Wait for navigation after form submission
       console.log('Waiting for navigation after form submission...');
-      await page.waitForNavigation({ 
-        waitUntil: 'networkidle0',
-        timeout: 30000 
-      });
+      try {
+        await page.waitForNavigation({ 
+          waitUntil: ['networkidle0', 'domcontentloaded'],
+          timeout: 30000 
+        });
+        console.log('Navigation completed');
+      } catch (error) {
+        console.log('Navigation timeout, continuing anyway:', error);
+      }
       
       // Wait for document to load
       console.log('Waiting for document to load...');
@@ -196,7 +228,17 @@ async function convertDocSendToPDF(url) {
       // Check if we're still on the email form
       const stillOnEmailForm = await page.$(emailSelectors[0]);
       if (stillOnEmailForm) {
+        // Take a screenshot for debugging
+        const screenshot = await page.screenshot({ fullPage: true });
+        console.log('Still on email form, took screenshot for debugging');
         throw new Error('Failed to submit email form - still on email form page');
+      }
+      
+      // Check for error messages
+      const errorMessage = await page.$('.error-message, .alert, .message');
+      if (errorMessage) {
+        const errorText = await page.evaluate(el => el.textContent, errorMessage);
+        throw new Error(`Authentication error: ${errorText}`);
       }
     }
     
@@ -242,13 +284,6 @@ async function convertDocSendToPDF(url) {
     
     if (!contentFound) {
       throw new Error('Could not find document content');
-    }
-    
-    // Check for error messages
-    const errorMessage = await page.$('.error-message');
-    if (errorMessage) {
-      const errorText = await page.evaluate(el => el.textContent, errorMessage);
-      throw new Error(`Authentication error: ${errorText}`);
     }
     
     // Capture screenshots of each page
