@@ -2,6 +2,7 @@ require('dotenv').config();
 const { App } = require('@slack/bolt');
 const express = require('express');
 const crypto = require('crypto');
+const puppeteer = require('puppeteer');
 
 // Initialize Express app
 const expressApp = express();
@@ -81,6 +82,49 @@ const verifySlackRequest = (req) => {
   );
 };
 
+// Function to convert DocSend to PDF
+async function convertDocSendToPDF(url) {
+  console.log('Starting PDF conversion for:', url);
+  
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
+  
+  try {
+    const page = await browser.newPage();
+    
+    // Set viewport to ensure proper rendering
+    await page.setViewport({ width: 1920, height: 1080 });
+    
+    // Navigate to the DocSend URL
+    await page.goto(url, { waitUntil: 'networkidle0' });
+    
+    // Wait for the document to load
+    await page.waitForSelector('.document-viewer', { timeout: 10000 });
+    
+    // Generate PDF
+    const pdf = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      margin: {
+        top: '20px',
+        right: '20px',
+        bottom: '20px',
+        left: '20px'
+      }
+    });
+    
+    console.log('PDF generated successfully');
+    return pdf;
+  } catch (error) {
+    console.error('Error generating PDF:', error);
+    throw error;
+  } finally {
+    await browser.close();
+  }
+}
+
 // Handle Slack events directly
 expressApp.post('/slack/events', (req, res) => {
   console.log('Received Slack event:', JSON.stringify(req.body));
@@ -132,13 +176,35 @@ expressApp.post('/slack/events', (req, res) => {
         if (docsendUrl) {
           console.log('Extracted DocSend URL:', docsendUrl);
           
-          // TODO: Add your DocSend processing logic here
-          // For now, just send a confirmation message
+          // Send initial response
           app.client.chat.postMessage({
             channel: event.channel,
-            text: `I found a DocSend link: ${docsendUrl}`,
+            text: `Converting DocSend document to PDF...`,
             thread_ts: event.thread_ts || event.ts
           }).catch(console.error);
+          
+          // Convert to PDF and send to Slack
+          convertDocSendToPDF(docsendUrl)
+            .then(async (pdfBuffer) => {
+              // Upload PDF to Slack
+              const result = await app.client.files.upload({
+                channels: event.channel,
+                file: pdfBuffer,
+                filename: 'document.pdf',
+                title: 'DocSend Document',
+                thread_ts: event.thread_ts || event.ts
+              });
+              
+              console.log('PDF uploaded successfully:', result);
+            })
+            .catch(async (error) => {
+              console.error('Error processing DocSend:', error);
+              await app.client.chat.postMessage({
+                channel: event.channel,
+                text: `Sorry, I couldn't convert the DocSend document to PDF. Error: ${error.message}`,
+                thread_ts: event.thread_ts || event.ts
+              });
+            });
         }
       }
     }
