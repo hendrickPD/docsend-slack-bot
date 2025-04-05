@@ -119,8 +119,14 @@ async function convertDocSendToPDF(url) {
     if (emailForm) {
       console.log('Found email authentication form');
       
+      // Get email from environment variable
+      const docsendEmail = process.env.DOCSEND_EMAIL;
+      if (!docsendEmail) {
+        throw new Error('DOCSEND_EMAIL environment variable is not set');
+      }
+      
       // Enter email and submit
-      await page.type('input[type="email"]', 'viewer@example.com');
+      await page.type('input[type="email"]', docsendEmail);
       await page.click('button[type="submit"]');
       
       // Wait for the document to load after authentication
