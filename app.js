@@ -226,253 +226,98 @@ async function convertDocSendToPDF(url) {
       await targetFrame.type('input[type="email"]', docsendEmail);
       console.log('Entered email in form');
       
-      // Try to find and click submit button
-      const submitSelectors = [
-        'button[type="submit"]',
-        'input[type="submit"]',
-        'button[class*="submit"]',
-        'button[class*="continue"]',
-        'input[class*="submit"]',
-        'input[class*="continue"]',
-        'button[class*="button"]',
-        'input[class*="button"]',
-        'button[class*="btn"]',
-        'input[class*="btn"]',
-        'button[class*="primary"]',
-        'input[class*="primary"]',
-        'button[class*="action"]',
-        'input[class*="action"]'
-      ];
-      
-      // Monitor network requests
-      let formSubmitted = false;
-      const responsePromise = new Promise((resolve, reject) => {
-        page.on('response', async response => {
-          const url = response.url();
-          console.log('Network response:', url);
-          
-          // Look for form submission response
-          if (url.includes('docsend.com') && 
-              (url.includes('/auth') || url.includes('/email') || url.includes('/verify'))) {
-            console.log('Found form submission response:', {
-              url: url,
-              status: response.status(),
-              ok: response.ok()
-            });
-            
-            if (response.ok()) {
-              formSubmitted = true;
-              resolve(response);
-            }
+      // Hide cookie banner and force click submit button
+      console.log('Hiding cookie banner and forcing submit button click...');
+      await targetFrame.evaluate(() => {
+        // Hide cookie banners and overlays
+        const overlays = [
+          '.cookie-acceptance',
+          '.cookie-banner',
+          '.cookie-notice',
+          '.cookie-consent',
+          '.gdpr-banner',
+          '.privacy-banner',
+          '.overlay',
+          '.modal',
+          '.popup'
+        ];
+        
+        overlays.forEach(selector => {
+          const element = document.querySelector(selector);
+          if (element) {
+            element.style.display = 'none';
+            console.log('Hidden overlay:', selector);
           }
         });
         
-        // Set a timeout
-        setTimeout(() => {
-          if (!formSubmitted) {
-            reject(new Error('Form submission response timeout'));
+        // Find and click submit button
+        const submitSelectors = [
+          'button[type="submit"]',
+          'input[type="submit"]',
+          'button[class*="submit"]',
+          'button[class*="continue"]',
+          'input[class*="submit"]',
+          'input[class*="continue"]',
+          'button[class*="button"]',
+          'input[class*="button"]',
+          'button[class*="btn"]',
+          'input[class*="btn"]',
+          'button[class*="primary"]',
+          'input[class*="primary"]',
+          'button[class*="action"]',
+          'input[class*="action"]'
+        ];
+        
+        for (const selector of submitSelectors) {
+          const button = document.querySelector(selector);
+          if (button) {
+            console.log('Found submit button with selector:', selector);
+            
+            // Try multiple click methods
+            try {
+              button.click();
+              console.log('Clicked button using click()');
+              return true;
+            } catch (e) {
+              console.log('Click() failed, trying dispatchEvent...');
+              button.dispatchEvent(new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                view: window
+              }));
+              console.log('Clicked button using dispatchEvent');
+              return true;
+            }
           }
-        }, 30000);
+        }
+        
+        return false;
       });
       
-      // Click the submit button and wait for response
-      let submitted = false;
-      for (const selector of submitSelectors) {
-        try {
-          const submitButton = await targetFrame.$(selector);
-          if (submitButton) {
-            // Poll for non-zero dimensions
-            console.log('Polling for button dimensions...');
-            let attempts = 0;
-            let hasValidDimensions = false;
-            
-            while (attempts < 10 && !hasValidDimensions) {
-              const dimensions = await targetFrame.evaluate(el => {
-                const rect = el.getBoundingClientRect();
-                return {
-                  width: rect.width,
-                  height: rect.height,
-                  top: rect.top,
-                  left: rect.left
-                };
-              }, submitButton);
-              
-              console.log('Button dimensions attempt', attempts + 1, ':', dimensions);
-              
-              if (dimensions.width > 0 && dimensions.height > 0) {
-                hasValidDimensions = true;
-                console.log('Button has valid dimensions:', dimensions);
-              } else {
-                attempts++;
-                await page.waitForTimeout(1000);
-              }
-            }
-            
-            if (!hasValidDimensions) {
-              console.log('Button still has zero dimensions after polling, trying JavaScript click...');
-              await targetFrame.evaluate(el => {
-                // Try multiple click methods
-                try {
-                  el.click();
-                } catch (e) {
-                  console.log('Direct click failed, trying dispatchEvent...');
-                  el.dispatchEvent(new MouseEvent('click', {
-                    bubbles: true,
-                    cancelable: true,
-                    view: window
-                  }));
-                }
-              }, submitButton);
-            } else {
-              // Get button text and state for logging
-              const buttonState = await targetFrame.evaluate(el => {
-                const style = window.getComputedStyle(el);
-                return {
-                  text: el.textContent || el.value || '',
-                  visible: style.display !== 'none' && style.visibility !== 'hidden',
-                  clickable: style.pointerEvents !== 'none',
-                  disabled: el.disabled,
-                  computedStyle: {
-                    display: style.display,
-                    visibility: style.visibility,
-                    opacity: style.opacity,
-                    pointerEvents: style.pointerEvents,
-                    position: style.position,
-                    zIndex: style.zIndex
-                  }
-                };
-              }, submitButton);
-              
-              console.log('Button state:', buttonState);
-              
-              // Scroll button into view
-              console.log('Scrolling button into view...');
-              await targetFrame.evaluate(el => {
-                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              }, submitButton);
-              await page.waitForTimeout(1000);
-              
-              // Wait for button to be enabled
-              if (buttonState.disabled) {
-                console.log('Button is disabled, waiting for it to become enabled...');
-                await targetFrame.waitForFunction(
-                  el => !el.disabled,
-                  { timeout: 10000 },
-                  submitButton
-                );
-                console.log('Button is now enabled');
-              }
-              
-              // Try multiple click methods
-              try {
-                // Method 1: Direct click
-                console.log('Attempting direct click...');
-                await submitButton.click();
-              } catch (clickError) {
-                console.log('Direct click failed, trying JavaScript click...');
-                
-                // Method 2: JavaScript click
-                await targetFrame.evaluate(el => {
-                  el.dispatchEvent(new MouseEvent('click', {
-                    bubbles: true,
-                    cancelable: true,
-                    view: window
-                  }));
-                }, submitButton);
-              }
-            }
-            
-            // Wait for response
-            console.log('Waiting for form submission response...');
-            await responsePromise;
-            
-            console.log('Form submitted successfully');
-            submitted = true;
-            break;
-          }
-        } catch (error) {
-          console.log('Failed to interact with button using selector:', selector, error);
-        }
-      }
-      
-      if (!submitted) {
-        // Try pressing Enter as fallback
-        console.log('Trying Enter key as fallback...');
-        
-        // Focus the email input first
-        const emailInput = await targetFrame.$('input[type="email"]');
-        if (emailInput) {
-          console.log('Focusing email input...');
-          await emailInput.focus();
-          await page.waitForTimeout(500);
-          
-          // Press Enter and wait for response
-          await Promise.all([
-            emailInput.press('Enter'),
-            responsePromise
-          ]);
-          console.log('Pressed Enter and received response');
-        } else {
-          throw new Error('Could not find email input for Enter key fallback');
-        }
-      }
-      
-      // Wait for success indicators
-      console.log('Waiting for success indicators...');
-      
-      // Define success indicators
-      const successIndicators = [
-        '.submission-success',
-        '.success-message',
-        '.alert-success',
-        '.message-success',
-        'div[class*="success"]',
-        'div[class*="Success"]',
-        'div[class*="submitted"]',
-        'div[class*="Submitted"]',
-        'div[class*="complete"]',
-        'div[class*="Complete"]',
-        'div[class*="done"]',
-        'div[class*="Done"]',
-        'iframe[src*="docsend"]',
-        'div[class*="viewer"]',
-        'div[class*="document"]',
-        'div[class*="content"]',
-        // Add more specific DocSend success indicators
-        'div[class*="viewer-container"]',
-        'div[class*="document-viewer"]',
-        'div[class*="preview-container"]',
-        'div[class*="embed-container"]',
-        'div[class*="slides-container"]',
-        'div[class*="pages-container"]',
-        'div[class*="navigation"]',
-        'div[class*="controls"]',
-        'div[class*="toolbar"]'
-      ];
-      
-      // Wait for any success indicator
-      let successFound = false;
-      for (const indicator of successIndicators) {
-        try {
-          console.log('Checking for success indicator:', indicator);
-          await targetFrame.waitForSelector(indicator, { timeout: 10000 });
-          console.log('Found success indicator:', indicator);
-          successFound = true;
-          break;
-        } catch (error) {
-          console.log('Success indicator not found:', indicator);
-        }
-      }
-      
-      if (!successFound) {
-        // Check if we're still on the email form
-        const stillOnEmailForm = await targetFrame.$(emailSelectors[0]);
-        if (stillOnEmailForm) {
-          throw new Error('Form submission appears to have failed - still on email form');
-        }
-        
-        // If not on email form, assume success and continue
-        console.log('No success indicators found, but not on email form - assuming success');
+      // Wait for navigation or content change
+      console.log('Waiting for page navigation or content change...');
+      try {
+        await page.waitForNavigation({ 
+          waitUntil: ['networkidle0', 'domcontentloaded'],
+          timeout: 60000 
+        });
+        console.log('Page navigation detected');
+      } catch (error) {
+        console.log('No navigation detected, waiting for content change...');
+        // If no navigation, wait for content to change
+        await page.waitForFunction(
+          () => {
+            const contentSelectors = [
+              'iframe[src*="docsend"]',
+              'div[class*="viewer"]',
+              'div[class*="document"]',
+              'div[class*="content"]'
+            ];
+            return contentSelectors.some(selector => document.querySelector(selector));
+          },
+          { timeout: 60000 }
+        );
+        console.log('Content change detected');
       }
       
       // Wait a bit for any dynamic content to load
