@@ -2,7 +2,8 @@ require('dotenv').config();
 const { App } = require('@slack/bolt');
 const express = require('express');
 const crypto = require('crypto');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
+const chromium = require('chrome-aws-lambda');
 
 // Initialize Express app
 const expressApp = express();
@@ -89,16 +90,15 @@ const verifySlackRequest = (req) => {
 async function convertDocSendToPDF(url) {
   console.log('Starting PDF conversion for:', url);
   
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu'
-    ],
-    executablePath: '/usr/bin/google-chrome'
-  });
+  const options = {
+    args: chromium.args,
+    defaultViewport: chromium.defaultViewport,
+    executablePath: await chromium.executablePath,
+    headless: chromium.headless,
+    ignoreHTTPSErrors: true,
+  };
+
+  const browser = await puppeteer.launch(options);
   
   try {
     const page = await browser.newPage();
