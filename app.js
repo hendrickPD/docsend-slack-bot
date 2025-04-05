@@ -167,52 +167,37 @@ async function convertDocSendToPDF(url) {
         throw new Error('DOCSEND_EMAIL environment variable is not set');
       }
       
-      // Enter email and submit
+      // Enter email and submit form using JavaScript
       console.log('Entering email and submitting form...');
-      await page.type(emailSelectors[0], docsendEmail);
-      
-      // Try different submit button selectors
-      const submitSelectors = [
-        'button[type="submit"]',
-        'form button',
-        'input[type="submit"]',
-        'button'
-      ];
-      
-      let submitSuccess = false;
-      for (const selector of submitSelectors) {
-        try {
-          console.log('Trying submit button selector:', selector);
-          const submitButton = await page.$(selector);
-          if (submitButton) {
-            console.log('Found submit button with selector:', selector);
-            await submitButton.click();
-            submitSuccess = true;
-            break;
+      await page.evaluate((email, selector) => {
+        const input = document.querySelector(selector);
+        if (input) {
+          input.value = email;
+          const form = input.closest('form');
+          if (form) {
+            form.submit();
+            return true;
           }
-        } catch (error) {
-          console.log('Error with selector:', selector, error);
         }
-      }
+        return false;
+      }, docsendEmail, emailSelectors[0]);
       
-      if (!submitSuccess) {
-        // Try Enter key press
-        try {
-          console.log('Trying Enter key press...');
-          await page.keyboard.press('Enter');
-          submitSuccess = true;
-        } catch (error) {
-          console.log('Enter key press failed');
-        }
-      }
+      // Wait for navigation after form submission
+      console.log('Waiting for navigation after form submission...');
+      await page.waitForNavigation({ 
+        waitUntil: 'networkidle0',
+        timeout: 30000 
+      });
       
-      if (!submitSuccess) {
-        throw new Error('Failed to submit the email form');
-      }
-      
-      // Wait for document to load after submission
-      console.log('Waiting for document to load after form submission...');
+      // Wait for document to load
+      console.log('Waiting for document to load...');
       await page.waitForTimeout(10000);
+      
+      // Check if we're still on the email form
+      const stillOnEmailForm = await page.$(emailSelectors[0]);
+      if (stillOnEmailForm) {
+        throw new Error('Failed to submit email form - still on email form page');
+      }
     }
     
     // Wait for document content
@@ -306,7 +291,15 @@ async function convertDocSendToPDF(url) {
         
         // Try to go to next page
         try {
-          await nextButton.click();
+          await page.evaluate((selector) => {
+            const button = document.querySelector(selector);
+            if (button) {
+              button.click();
+              return true;
+            }
+            return false;
+          }, pageNavSelectors[0]);
+          
           await page.waitForTimeout(2000); // Wait for page transition
           
           // Check if we're still on the same page
@@ -345,29 +338,52 @@ async function convertDocSendToPDF(url) {
 // Function to convert screenshots to PDF
 async function createPDFFromScreenshots(screenshots) {
   console.log('Creating PDF from screenshots...');
-  
-  // Create a new PDF document
   const pdfDoc = await PDFDocument.create();
   
-  // Add each screenshot as a page
-  for (const screenshot of screenshots) {
-    // Convert PNG to JPEG for better PDF compatibility
-    const jpegImage = await pdfDoc.embedJpg(screenshot);
-    
-    // Add a new page with the same dimensions as the image
-    const page = pdfDoc.addPage([jpegImage.width, jpegImage.height]);
-    
-    // Draw the image on the page
-    page.drawImage(jpegImage, {
-      x: 0,
-      y: 0,
-      width: jpegImage.width,
-      height: jpegImage.height,
-    });
+  for (let i = 0; i < screenshots.length; i++) {
+    try {
+      console.log(`Processing screenshot ${i + 1} of ${screenshots.length}...`);
+      
+      // First try to embed as PNG
+      try {
+        const pngImage = await pdfDoc.embedPng(screenshots[i]);
+        const page = pdfDoc.addPage([pngImage.width, pngImage.height]);
+        page.drawImage(pngImage, {
+          x: 0,
+          y: 0,
+          width: pngImage.width,
+          height: pngImage.height,
+        });
+        console.log(`Successfully added page ${i + 1} as PNG`);
+        continue;
+      } catch (pngError) {
+        console.log(`Failed to embed as PNG, trying JPEG: ${pngError.message}`);
+      }
+      
+      // If PNG fails, try JPEG
+      try {
+        const jpegImage = await pdfDoc.embedJpg(screenshots[i]);
+        const page = pdfDoc.addPage([jpegImage.width, jpegImage.height]);
+        page.drawImage(jpegImage, {
+          x: 0,
+          y: 0,
+          width: jpegImage.width,
+          height: jpegImage.height,
+        });
+        console.log(`Successfully added page ${i + 1} as JPEG`);
+      } catch (jpegError) {
+        console.error(`Failed to embed page ${i + 1} as JPEG: ${jpegError.message}`);
+        throw new Error(`Failed to process screenshot ${i + 1}: ${jpegError.message}`);
+      }
+    } catch (error) {
+      console.error(`Error processing screenshot ${i + 1}:`, error);
+      throw error;
+    }
   }
   
-  // Save the PDF
+  console.log('Saving PDF...');
   const pdfBytes = await pdfDoc.save();
+  console.log('PDF created successfully');
   return pdfBytes;
 }
 
