@@ -174,8 +174,6 @@ async function convertDocSendToPDF(url) {
       // Try different submit button selectors
       const submitSelectors = [
         'button[type="submit"]',
-        'button:contains("Continue")',
-        'button:contains("Submit")',
         'form button',
         'input[type="submit"]',
         'button'
@@ -189,16 +187,6 @@ async function convertDocSendToPDF(url) {
           if (submitButton) {
             console.log('Found submit button with selector:', selector);
             
-            // Wait for button to be visible and clickable
-            await page.waitForFunction(
-              (sel) => {
-                const button = document.querySelector(sel);
-                return button && button.offsetParent !== null;
-              },
-              { timeout: 5000 },
-              selector
-            );
-            
             // Try different ways to submit the form
             try {
               // Method 1: Direct click
@@ -211,7 +199,7 @@ async function convertDocSendToPDF(url) {
                 // Method 2: JavaScript click
                 await page.evaluate((sel) => {
                   const button = document.querySelector(sel);
-                  button.click();
+                  if (button) button.click();
                 }, selector);
                 submitSuccess = true;
               } catch (jsClickError) {
@@ -221,7 +209,11 @@ async function convertDocSendToPDF(url) {
                   // Method 3: Form submit
                   await page.evaluate(() => {
                     const form = document.querySelector('form');
-                    if (form) form.submit();
+                    if (form) {
+                      form.submit();
+                      return true;
+                    }
+                    return false;
                   });
                   submitSuccess = true;
                 } catch (formSubmitError) {
@@ -237,6 +229,17 @@ async function convertDocSendToPDF(url) {
           }
         } catch (error) {
           console.log('Error with selector:', selector, error);
+        }
+      }
+      
+      if (!submitSuccess) {
+        // Try one last method: simulate Enter key press
+        try {
+          console.log('Trying Enter key press...');
+          await page.keyboard.press('Enter');
+          submitSuccess = true;
+        } catch (error) {
+          console.log('Enter key press failed');
         }
       }
       
