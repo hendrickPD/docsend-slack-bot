@@ -95,7 +95,9 @@ async function convertDocSendToPDF(url) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-gpu'
+      '--disable-gpu',
+      '--disable-web-security',
+      '--disable-features=IsolateOrigins,site-per-process'
     ]
   });
   
@@ -106,20 +108,32 @@ async function convertDocSendToPDF(url) {
     await page.setViewport({ width: 1920, height: 1080 });
     
     // Set a longer timeout for navigation
-    await page.setDefaultNavigationTimeout(30000);
+    await page.setDefaultNavigationTimeout(60000);
     
     // Enable console logging
     page.on('console', msg => console.log('Browser console:', msg.text()));
     
-    // Set a realistic user agent
+    // Set a realistic user agent and additional headers
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+      'Sec-Fetch-Site': 'none',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-User': '?1',
+      'Sec-Fetch-Dest': 'document',
+      'Upgrade-Insecure-Requests': '1'
+    });
     
-    // Navigate to the DocSend URL and wait for network to be idle
+    // Navigate to the DocSend URL with a more relaxed wait strategy
     console.log('Navigating to URL...');
     await page.goto(url, { 
-      waitUntil: ['networkidle0', 'domcontentloaded'],
-      timeout: 30000
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
     });
+    
+    // Wait for a short time to let the page load
+    await page.waitForTimeout(5000);
     
     // Take a screenshot for debugging
     await page.screenshot({ path: 'debug.png' });
@@ -131,7 +145,8 @@ async function convertDocSendToPDF(url) {
       'input[name="email"]',
       'input[placeholder*="email" i]',
       'input[placeholder*="Email" i]',
-      'form input[type="text"]'
+      'form input[type="text"]',
+      'input[type="text"]'
     ];
     
     let emailForm = null;
@@ -162,7 +177,8 @@ async function convertDocSendToPDF(url) {
         'button:contains("Continue")',
         'button:contains("Submit")',
         'form button',
-        'input[type="submit"]'
+        'input[type="submit"]',
+        'button'
       ];
       
       for (const selector of submitSelectors) {
@@ -174,9 +190,8 @@ async function convertDocSendToPDF(url) {
         }
       }
       
-      // Wait for navigation after form submission
-      console.log('Waiting for navigation after form submission...');
-      await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 30000 });
+      // Wait for a short time after clicking
+      await page.waitForTimeout(3000);
       
       // Take another screenshot for debugging
       await page.screenshot({ path: 'debug-after-submit.png' });
@@ -193,7 +208,8 @@ async function convertDocSendToPDF(url) {
     await Promise.race([
       page.waitForSelector('.document-viewer', { timeout: 30000 }),
       page.waitForSelector('.error-message', { timeout: 30000 }),
-      page.waitForSelector('iframe', { timeout: 30000 })
+      page.waitForSelector('iframe', { timeout: 30000 }),
+      page.waitForSelector('div[class*="viewer"]', { timeout: 30000 })
     ]);
     
     // Check for error messages
