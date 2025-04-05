@@ -96,7 +96,8 @@ async function convertDocSendToPDF(url) {
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
       '--disable-gpu'
-    ]
+    ],
+    executablePath: '/usr/bin/google-chrome'
   });
   
   try {
