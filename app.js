@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { App } = require('@slack/bolt');
 const express = require('express');
+const crypto = require('crypto');
 
 // Initialize Express app
 const expressApp = express();
@@ -22,40 +23,60 @@ expressApp.get('/', (req, res) => {
 // Initialize Slack app
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
-  signingSecret: process.env.SLACK_SIGNING_SECRET,
-  customRoutes: [
-    {
-      path: '/slack/events',
-      method: ['POST'],
-      handler: (req, res) => {
-        console.log('Received Slack event:', JSON.stringify(req.body));
-        
-        // Handle Slack's challenge verification
-        if (req.body.type === 'url_verification') {
-          console.log('Handling challenge verification');
-          // Respond with just the challenge value in plaintext
-          res.set('Content-Type', 'text/plain');
-          res.send(req.body.challenge);
-          return;
-        }
-        
-        // Handle other events
-        console.log('Processing regular event');
-        app.processEvent(req.body);
-        res.status(200).send();
-      }
-    }
-  ]
+  signingSecret: process.env.SLACK_SIGNING_SECRET
+});
+
+// Verify Slack request signature
+const verifySlackRequest = (req) => {
+  const timestamp = req.headers['x-slack-request-timestamp'];
+  const signature = req.headers['x-slack-signature'];
+  
+  // Verify request is not older than 5 minutes
+  if (Math.abs(Date.now() / 1000 - timestamp) > 300) {
+    return false;
+  }
+  
+  const sigBasestring = `v0:${timestamp}:${JSON.stringify(req.body)}`;
+  const mySignature = `v0=${crypto
+    .createHmac('sha256', process.env.SLACK_SIGNING_SECRET)
+    .update(sigBasestring)
+    .digest('hex')}`;
+    
+  return crypto.timingSafeEqual(
+    Buffer.from(signature),
+    Buffer.from(mySignature)
+  );
+};
+
+// Handle Slack events directly
+expressApp.post('/slack/events', (req, res) => {
+  console.log('Received Slack event:', JSON.stringify(req.body));
+  
+  // Verify request signature
+  if (!verifySlackRequest(req)) {
+    console.log('Invalid request signature');
+    res.status(401).send('Invalid request signature');
+    return;
+  }
+  
+  // Handle Slack's challenge verification
+  if (req.body.type === 'url_verification') {
+    console.log('Handling challenge verification');
+    res.set('Content-Type', 'text/plain');
+    res.send(req.body.challenge);
+    return;
+  }
+  
+  // Handle other events
+  console.log('Processing regular event');
+  app.processEvent(req.body);
+  res.status(200).send();
 });
 
 // Start the Express server
 const port = process.env.PORT || 10000;
 expressApp.listen(port, () => {
   console.log(`Server is running on port ${port}`);
-  console.log('Environment variables:', {
-    hasBotToken: !!process.env.SLACK_BOT_TOKEN,
-    hasSigningSecret: !!process.env.SLACK_SIGNING_SECRET
-  });
 });
 
 // Start the Slack app
