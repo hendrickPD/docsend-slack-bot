@@ -933,6 +933,10 @@ expressApp.post('/slack/events', (req, res) => {
         if (docsendUrl) {
           console.log('Extracted DocSend URL:', docsendUrl);
           
+          // Extract document ID from URL
+          const docId = docsendUrl.split('/').pop();
+          console.log('Extracted document ID:', docId);
+          
           // Create a unique key for this message
           const messageKey = `${messageId}_${docsendUrl}`;
           
@@ -972,8 +976,8 @@ expressApp.post('/slack/events', (req, res) => {
                 const result = await app.client.files.uploadV2({
                   channel_id: event.channel,
                   file: pdfBuffer,
-                  filename: 'document.pdf',
-                  title: 'DocSend Document',
+                  filename: `${docId}.pdf`,
+                  title: `DocSend Document ${docId}`,
                   thread_ts: event.thread_ts || event.ts,
                   initial_comment: 'Here is your DocSend document converted to PDF.'
                 });
