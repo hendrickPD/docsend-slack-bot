@@ -985,7 +985,7 @@ expressApp.post('/slack/events', (req, res) => {
     await checkHealth();
     
     // Start Express server
-    app.listen(process.env.PORT, () => {
+    expressApp.listen(process.env.PORT, () => {
       console.log(`Server is running on port ${process.env.PORT}`);
     });
   } catch (error) {
