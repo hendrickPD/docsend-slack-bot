@@ -286,9 +286,10 @@ async function convertDocSendToPDF(url) {
       // Wait for CSS to take effect
       await page.waitForTimeout(500);
       
-      // Try to find and click the "Accept All Cookies" button using XPath
+      // Try to find and click the "Accept All Cookies" button using multiple approaches
       console.log('Looking for Accept All Cookies button...');
-      const acceptButtonXPaths = [
+      const acceptButtonSelectors = [
+        // XPath selectors
         "//button[contains(., 'Accept All Cookies')]",
         "//button[contains(., 'Accept all cookies')]",
         "//button[contains(., 'Accept All')]",
@@ -296,26 +297,80 @@ async function convertDocSendToPDF(url) {
         "//button[contains(., 'Accept')]",
         "//button[contains(., 'Allow All')]",
         "//button[contains(., 'Allow all')]",
-        "//button[contains(., 'Allow')]"
+        "//button[contains(., 'Allow')]",
+        // CSS selectors
+        "button[aria-label*='Accept']",
+        "button[aria-label*='Allow']",
+        "button[class*='accept']",
+        "button[class*='allow']",
+        "button[class*='cookie']",
+        "button[class*='consent']",
+        "button[class*='banner']",
+        "button[class*='notice']",
+        "button[class*='modal']",
+        "button[class*='overlay']",
+        "button[class*='dialog']",
+        "button[class*='policy']",
+        // More specific DocSend selectors
+        "button[class*='docsend-cookie']",
+        "button[class*='docsend-banner']",
+        "button[class*='docsend-notice']",
+        "button[class*='docsend-modal']",
+        "button[class*='docsend-overlay']",
+        "button[class*='docsend-dialog']",
+        "button[class*='docsend-policy']"
       ];
       
       let acceptButtonFound = false;
-      for (const xpath of acceptButtonXPaths) {
-        try {
-          const [acceptButton] = await page.$x(xpath);
-          if (acceptButton) {
-            await acceptButton.click();
-            console.log(`Clicked Accept button found with XPath: ${xpath}`);
-            acceptButtonFound = true;
-            break;
+      let retryCount = 0;
+      const maxRetries = 3;
+      
+      while (!acceptButtonFound && retryCount < maxRetries) {
+        for (const selector of acceptButtonSelectors) {
+          try {
+            let button;
+            if (selector.startsWith('//')) {
+              // XPath selector
+              [button] = await page.$x(selector);
+            } else {
+              // CSS selector
+              button = await page.$(selector);
+            }
+            
+            if (button) {
+              // Ensure button is visible and clickable
+              const isVisible = await button.evaluate(el => {
+                const style = window.getComputedStyle(el);
+                return style.display !== 'none' && 
+                       style.visibility !== 'hidden' && 
+                       style.opacity !== '0' &&
+                       el.offsetWidth > 0 &&
+                       el.offsetHeight > 0;
+              });
+              
+              if (isVisible) {
+                await button.click();
+                console.log(`Clicked Accept button found with selector: ${selector}`);
+                acceptButtonFound = true;
+                break;
+              }
+            }
+          } catch (error) {
+            console.log(`Error with selector ${selector}:`, error);
           }
-        } catch (error) {
-          console.log(`Error clicking Accept button with XPath ${xpath}:`, error);
+        }
+        
+        if (!acceptButtonFound) {
+          retryCount++;
+          if (retryCount < maxRetries) {
+            console.log(`Retry ${retryCount}/${maxRetries} to find Accept button...`);
+            await page.waitForTimeout(1000);
+          }
         }
       }
       
       if (!acceptButtonFound) {
-        console.log('No Accept All Cookies button found');
+        console.log('No Accept All Cookies button found after all attempts');
       }
       
       // Wait for any cookie-related changes to take effect
