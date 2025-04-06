@@ -535,7 +535,13 @@ async function convertDocSendToPDF(url) {
           '.toolbar-button',
           '.toolbar-rule',
           '.positioned-context',
-          '.toolbar-popover'
+          '.toolbar-popover',
+          '.left.carousel-control',
+          '.right.carousel-control',
+          '#prevPageButton',
+          '#nextPageButton',
+          '#prevPageIcon',
+          '#nextPageIcon'
         ];
         
         // Hide bottom navigation elements
@@ -587,7 +593,13 @@ async function convertDocSendToPDF(url) {
           '.toolbar-button',
           '.toolbar-rule',
           '.positioned-context',
-          '.toolbar-popover'
+          '.toolbar-popover',
+          '.left.carousel-control',
+          '.right.carousel-control',
+          '#prevPageButton',
+          '#nextPageButton',
+          '#prevPageIcon',
+          '#nextPageIcon'
         ];
         
         // Hide bottom navigation elements
@@ -687,7 +699,13 @@ async function convertDocSendToPDF(url) {
             '.toolbar-button',
             '.toolbar-rule',
             '.positioned-context',
-            '.toolbar-popover'
+            '.toolbar-popover',
+            '.left.carousel-control',
+            '.right.carousel-control',
+            '#prevPageButton',
+            '#nextPageButton',
+            '#prevPageIcon',
+            '#nextPageIcon'
           ];
           
           // Hide bottom navigation elements
@@ -898,7 +916,13 @@ async function convertDocSendToPDF(url) {
           '.toolbar-button',
           '.toolbar-rule',
           '.positioned-context',
-          '.toolbar-popover'
+          '.toolbar-popover',
+          '.left.carousel-control',
+          '.right.carousel-control',
+          '#prevPageButton',
+          '#nextPageButton',
+          '#prevPageIcon',
+          '#nextPageIcon'
         ];
         
         // Hide bottom navigation elements
