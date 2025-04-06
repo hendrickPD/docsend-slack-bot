@@ -259,16 +259,13 @@ async function convertDocSendToPDF(url) {
               if (frame) {
                 console.log('Successfully accessed iframe content');
                 
-                // Try to find and click the accept button within the iframe
+                // Try to find the accept button using its exact attributes
                 const acceptButtonSelectors = [
-                  'button[aria-label*="Accept"]',
-                  'button[aria-label*="Allow"]',
-                  'button[class*="accept"]',
-                  'button[class*="allow"]',
-                  'button:contains("Accept")',
-                  'button:contains("Allow")',
-                  'button:contains("Agree")',
-                  'button:contains("OK")'
+                  '#accept_all_cookies_button',
+                  '[data-testid="accept_all_cookies_button"]',
+                  '[data-uxa-log="privacy_consent_banner_accept_all_button"]',
+                  'button[class*="dig-Button"][class*="dig-Button--primary"]',
+                  'button:contains("Accept All")'
                 ];
                 
                 for (const buttonSelector of acceptButtonSelectors) {
@@ -286,8 +283,15 @@ async function convertDocSendToPDF(url) {
                       });
                       
                       if (isVisible) {
-                        await acceptButton.click();
-                        console.log(`Clicked accept button in CCPA iframe with selector: ${buttonSelector}`);
+                        // Try to click the button using different methods
+                        try {
+                          await acceptButton.click();
+                          console.log(`Clicked accept button using click() method with selector: ${buttonSelector}`);
+                        } catch (clickError) {
+                          console.log('Click method failed, trying evaluate...');
+                          await acceptButton.evaluate(el => el.click());
+                          console.log(`Clicked accept button using evaluate() method with selector: ${buttonSelector}`);
+                        }
                         cookieBannerFound = true;
                         break;
                       }
