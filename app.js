@@ -517,6 +517,110 @@ async function convertDocSendToPDF(url) {
       // Wait a bit for any dynamic content to load
       await page.waitForTimeout(5000);
       
+      // Wait for the document to load
+      await page.waitForSelector('.preso-view.page-view', { timeout: 10000 });
+
+      // Hide header and navigation elements
+      await page.evaluate(() => {
+        // Hide header elements
+        const headerSelectors = [
+          'header',
+          '.header',
+          '.top-bar',
+          '.navigation',
+          '.nav',
+          '.toolbar',
+          '.controls'
+        ];
+        
+        // Hide bottom navigation elements
+        const bottomSelectors = [
+          '.navbar-fixed-bottom',
+          '.presentation-fixed-footer',
+          '.presentation-privacy-policy',
+          '.bottom-bar',
+          '.footer',
+          '.navigation',
+          '.page-controls',
+          '.controls'
+        ];
+
+        headerSelectors.forEach(selector => {
+          const elements = document.querySelectorAll(selector);
+          elements.forEach(el => {
+            if (el) el.style.display = 'none';
+          });
+        });
+
+        bottomSelectors.forEach(selector => {
+          const elements = document.querySelectorAll(selector);
+          elements.forEach(el => {
+            if (el) el.style.display = 'none';
+          });
+        });
+      });
+
+      // Click center of page to ensure focus
+      const viewport = await page.viewport();
+      const centerX = viewport.width / 2;
+      const centerY = viewport.height / 2;
+      await page.mouse.click(centerX, centerY);
+      console.log('Clicked center of page for focus');
+
+      // Hide header and navigation elements
+      await page.evaluate(() => {
+        // Hide header elements
+        const headerSelectors = [
+          'header',
+          '.header',
+          '.top-bar',
+          '.navigation',
+          '.nav',
+          '.toolbar',
+          '.controls'
+        ];
+        
+        // Hide bottom navigation elements
+        const bottomSelectors = [
+          '.navbar-fixed-bottom',
+          '.presentation-fixed-footer',
+          '.presentation-privacy-policy',
+          '.bottom-bar',
+          '.footer',
+          '.navigation',
+          '.page-controls',
+          '.controls'
+        ];
+
+        headerSelectors.forEach(selector => {
+          const elements = document.querySelectorAll(selector);
+          elements.forEach(el => {
+            if (el) el.style.display = 'none';
+          });
+        });
+
+        bottomSelectors.forEach(selector => {
+          const elements = document.querySelectorAll(selector);
+          elements.forEach(el => {
+            if (el) el.style.display = 'none';
+          });
+        });
+      });
+
+      // Take screenshot of current page
+      const screenshot = await page.screenshot({
+        fullPage: true,
+        type: 'jpeg',
+        quality: 80,
+        encoding: 'binary'
+      });
+
+      // Get all image elements
+      const imageElements = await page.evaluate(() => {
+        const elements = document.querySelectorAll('img');
+        return Array.from(elements).map(el => el.src);
+      });
+      
       // Capture screenshots of each page
       console.log('Capturing document pages...');
       const screenshots = [];
@@ -558,6 +662,46 @@ async function convertDocSendToPDF(url) {
         await page.mouse.click(centerX, centerY);
         console.log('Clicked center of page for focus');
         
+        // Hide header and navigation elements
+        await page.evaluate(() => {
+          // Hide header elements
+          const headerSelectors = [
+            'header',
+            '.header',
+            '.top-bar',
+            '.navigation',
+            '.nav',
+            '.toolbar',
+            '.controls'
+          ];
+          
+          // Hide bottom navigation elements
+          const bottomSelectors = [
+            '.navbar-fixed-bottom',
+            '.presentation-fixed-footer',
+            '.presentation-privacy-policy',
+            '.bottom-bar',
+            '.footer',
+            '.navigation',
+            '.page-controls',
+            '.controls'
+          ];
+
+          headerSelectors.forEach(selector => {
+            const elements = document.querySelectorAll(selector);
+            elements.forEach(el => {
+              if (el) el.style.display = 'none';
+            });
+          });
+
+          bottomSelectors.forEach(selector => {
+            const elements = document.querySelectorAll(selector);
+            elements.forEach(el => {
+              if (el) el.style.display = 'none';
+            });
+          });
+        });
+
         // Take screenshot of current page
         const screenshot = await page.screenshot({
           fullPage: true,
@@ -724,6 +868,46 @@ async function convertDocSendToPDF(url) {
       await page.mouse.click(centerX, centerY);
       console.log('Clicked center of page for focus');
       
+      // Hide header and navigation elements
+      await page.evaluate(() => {
+        // Hide header elements
+        const headerSelectors = [
+          'header',
+          '.header',
+          '.top-bar',
+          '.navigation',
+          '.nav',
+          '.toolbar',
+          '.controls'
+        ];
+        
+        // Hide bottom navigation elements
+        const bottomSelectors = [
+          '.navbar-fixed-bottom',
+          '.presentation-fixed-footer',
+          '.presentation-privacy-policy',
+          '.bottom-bar',
+          '.footer',
+          '.navigation',
+          '.page-controls',
+          '.controls'
+        ];
+
+        headerSelectors.forEach(selector => {
+          const elements = document.querySelectorAll(selector);
+          elements.forEach(el => {
+            if (el) el.style.display = 'none';
+          });
+        });
+
+        bottomSelectors.forEach(selector => {
+          const elements = document.querySelectorAll(selector);
+          elements.forEach(el => {
+            if (el) el.style.display = 'none';
+          });
+        });
+      });
+
       // Take screenshot of current page
       const screenshot = await page.screenshot({
         fullPage: true,
