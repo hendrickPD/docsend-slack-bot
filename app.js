@@ -229,24 +229,14 @@ async function convertDocSendToPDF(url) {
       // Hide cookie banners and overlays
       console.log('Hiding cookie banners and overlays...');
       
-      // First try to find and click the cookie banner in the main frame
-      console.log('Looking for cookie banner in main frame...');
-      const cookieBannerSelectors = [
-        // Common cookie banner containers
-        'div[class*="cookie-banner"]',
-        'div[class*="cookie-notice"]',
-        'div[class*="cookie-modal"]',
-        'div[class*="cookie-overlay"]',
-        'div[class*="cookie-dialog"]',
-        'div[class*="cookie-policy"]',
-        // DocSend-specific containers
-        'div[class*="docsend-cookie"]',
-        'div[class*="docsend-banner"]',
-        'div[class*="docsend-notice"]',
-        'div[class*="docsend-modal"]',
-        'div[class*="docsend-overlay"]',
-        'div[class*="docsend-dialog"]',
-        'div[class*="docsend-policy"]'
+      // First try to find and interact with the CCPA iframe
+      console.log('Looking for CCPA iframe...');
+      const ccpaIframeSelectors = [
+        '#ccpa-iframe',
+        '[data-testid="ccpa-iframe"]',
+        'iframe[src*="ccpa"]',
+        'iframe[src*="consent"]',
+        'iframe[src*="cookie"]'
       ];
       
       let cookieBannerFound = false;
@@ -257,64 +247,74 @@ async function convertDocSendToPDF(url) {
         // Wait for any dynamic content to load
         await page.waitForTimeout(1000);
         
-        // Check main frame first
-        for (const selector of cookieBannerSelectors) {
+        // Try to find the CCPA iframe
+        for (const selector of ccpaIframeSelectors) {
           try {
-            const banner = await page.$(selector);
-            if (banner) {
-              console.log(`Found cookie banner with selector: ${selector}`);
+            const iframeElement = await page.$(selector);
+            if (iframeElement) {
+              console.log(`Found CCPA iframe with selector: ${selector}`);
               
-              // Try to find and click the accept button within the banner
-              const acceptButton = await banner.$('button[aria-label*="Accept"], button[aria-label*="Allow"], button[class*="accept"], button[class*="allow"]');
-              if (acceptButton) {
-                await acceptButton.click();
-                console.log('Clicked accept button within cookie banner');
-                cookieBannerFound = true;
-                break;
+              // Get the iframe's content frame
+              const frame = await iframeElement.contentFrame();
+              if (frame) {
+                console.log('Successfully accessed iframe content');
+                
+                // Try to find and click the accept button within the iframe
+                const acceptButtonSelectors = [
+                  'button[aria-label*="Accept"]',
+                  'button[aria-label*="Allow"]',
+                  'button[class*="accept"]',
+                  'button[class*="allow"]',
+                  'button:contains("Accept")',
+                  'button:contains("Allow")',
+                  'button:contains("Agree")',
+                  'button:contains("OK")'
+                ];
+                
+                for (const buttonSelector of acceptButtonSelectors) {
+                  try {
+                    const acceptButton = await frame.$(buttonSelector);
+                    if (acceptButton) {
+                      // Ensure button is visible and clickable
+                      const isVisible = await acceptButton.evaluate(el => {
+                        const style = window.getComputedStyle(el);
+                        return style.display !== 'none' && 
+                               style.visibility !== 'hidden' && 
+                               style.opacity !== '0' &&
+                               el.offsetWidth > 0 &&
+                               el.offsetHeight > 0;
+                      });
+                      
+                      if (isVisible) {
+                        await acceptButton.click();
+                        console.log(`Clicked accept button in CCPA iframe with selector: ${buttonSelector}`);
+                        cookieBannerFound = true;
+                        break;
+                      }
+                    }
+                  } catch (error) {
+                    console.log(`Error with button selector ${buttonSelector}:`, error);
+                  }
+                }
+                
+                if (cookieBannerFound) break;
               }
             }
           } catch (error) {
-            console.log(`Error with selector ${selector}:`, error);
-          }
-        }
-        
-        // If not found in main frame, check all frames
-        if (!cookieBannerFound) {
-          const frames = page.frames();
-          for (const frame of frames) {
-            for (const selector of cookieBannerSelectors) {
-              try {
-                const banner = await frame.$(selector);
-                if (banner) {
-                  console.log(`Found cookie banner in frame with selector: ${selector}`);
-                  
-                  // Try to find and click the accept button within the banner
-                  const acceptButton = await banner.$('button[aria-label*="Accept"], button[aria-label*="Allow"], button[class*="accept"], button[class*="allow"]');
-                  if (acceptButton) {
-                    await acceptButton.click();
-                    console.log('Clicked accept button within cookie banner in frame');
-                    cookieBannerFound = true;
-                    break;
-                  }
-                }
-              } catch (error) {
-                console.log(`Error with selector ${selector} in frame:`, error);
-              }
-            }
-            if (cookieBannerFound) break;
+            console.log(`Error with iframe selector ${selector}:`, error);
           }
         }
         
         if (!cookieBannerFound) {
           retryCount++;
           if (retryCount < maxRetries) {
-            console.log(`Retry ${retryCount}/${maxRetries} to find cookie banner...`);
+            console.log(`Retry ${retryCount}/${maxRetries} to find CCPA iframe...`);
           }
         }
       }
       
       if (!cookieBannerFound) {
-        console.log('No cookie banner found after all attempts');
+        console.log('No CCPA iframe or accept button found after all attempts');
       }
       
       // Wait for any cookie-related changes to take effect
