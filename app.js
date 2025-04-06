@@ -229,6 +229,10 @@ async function convertDocSendToPDF(url) {
       // Hide cookie banners and overlays
       console.log('Hiding cookie banners and overlays...');
       
+      // Wait for the page to stabilize and any dynamic content to load
+      console.log('Waiting for page to stabilize...');
+      await page.waitForTimeout(3000); // Increased initial wait time
+      
       // First try to find and interact with the CCPA iframe
       console.log('Looking for CCPA iframe...');
       const ccpaIframeSelectors = [
@@ -241,16 +245,17 @@ async function convertDocSendToPDF(url) {
       
       let cookieBannerFound = false;
       let retryCount = 0;
-      const maxRetries = 5;
+      const maxRetries = 10; // Increased retries
       
       while (!cookieBannerFound && retryCount < maxRetries) {
         // Wait for any dynamic content to load
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(2000); // Increased wait time between retries
         
         // Try to find the CCPA iframe
         for (const selector of ccpaIframeSelectors) {
           try {
-            const iframeElement = await page.$(selector);
+            // Wait for the iframe to be present in the DOM
+            const iframeElement = await page.waitForSelector(selector, { timeout: 5000 });
             if (iframeElement) {
               console.log(`Found CCPA iframe with selector: ${selector}`);
               
@@ -259,49 +264,39 @@ async function convertDocSendToPDF(url) {
               if (frame) {
                 console.log('Successfully accessed iframe content');
                 
-                // Try to find the accept button using its exact attributes
-                const acceptButtonSelectors = [
-                  '#accept_all_cookies_button',
-                  '[data-testid="accept_all_cookies_button"]',
-                  '[data-uxa-log="privacy_consent_banner_accept_all_button"]',
-                  'button[class*="dig-Button"][class*="dig-Button--primary"]',
-                  'button:contains("Accept All")'
-                ];
-                
-                for (const buttonSelector of acceptButtonSelectors) {
-                  try {
-                    const acceptButton = await frame.$(buttonSelector);
-                    if (acceptButton) {
-                      // Ensure button is visible and clickable
-                      const isVisible = await acceptButton.evaluate(el => {
-                        const style = window.getComputedStyle(el);
-                        return style.display !== 'none' && 
-                               style.visibility !== 'hidden' && 
-                               style.opacity !== '0' &&
-                               el.offsetWidth > 0 &&
-                               el.offsetHeight > 0;
-                      });
-                      
-                      if (isVisible) {
-                        // Try to click the button using different methods
-                        try {
-                          await acceptButton.click();
-                          console.log(`Clicked accept button using click() method with selector: ${buttonSelector}`);
-                        } catch (clickError) {
-                          console.log('Click method failed, trying evaluate...');
-                          await acceptButton.evaluate(el => el.click());
-                          console.log(`Clicked accept button using evaluate() method with selector: ${buttonSelector}`);
-                        }
-                        cookieBannerFound = true;
-                        break;
+                // Wait for the accept button to be present in the iframe
+                try {
+                  const acceptButton = await frame.waitForSelector('#accept_all_cookies_button', { timeout: 5000 });
+                  if (acceptButton) {
+                    console.log('Found accept button in iframe');
+                    
+                    // Ensure button is visible and clickable
+                    const isVisible = await acceptButton.evaluate(el => {
+                      const style = window.getComputedStyle(el);
+                      return style.display !== 'none' && 
+                             style.visibility !== 'hidden' && 
+                             style.opacity !== '0' &&
+                             el.offsetWidth > 0 &&
+                             el.offsetHeight > 0;
+                    });
+                    
+                    if (isVisible) {
+                      // Try to click the button using different methods
+                      try {
+                        await acceptButton.click();
+                        console.log('Clicked accept button using click() method');
+                      } catch (clickError) {
+                        console.log('Click method failed, trying evaluate...');
+                        await acceptButton.evaluate(el => el.click());
+                        console.log('Clicked accept button using evaluate() method');
                       }
+                      cookieBannerFound = true;
+                      break;
                     }
-                  } catch (error) {
-                    console.log(`Error with button selector ${buttonSelector}:`, error);
                   }
+                } catch (error) {
+                  console.log('Accept button not found in iframe yet:', error);
                 }
-                
-                if (cookieBannerFound) break;
               }
             }
           } catch (error) {
@@ -322,7 +317,7 @@ async function convertDocSendToPDF(url) {
       }
       
       // Wait for any cookie-related changes to take effect
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(2000);
       
       // Try finding button by text using XPath first
       console.log('Trying to find button by text using XPath...');
