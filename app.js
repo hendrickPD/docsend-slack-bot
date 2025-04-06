@@ -584,7 +584,8 @@ async function convertDocSendToPDF(url) {
         // Take screenshot of current page
         const screenshot = await page.screenshot({
           fullPage: true,
-          type: 'png',
+          type: 'jpeg',
+          quality: 80,
           encoding: 'binary'
         });
         
@@ -608,7 +609,8 @@ async function convertDocSendToPDF(url) {
           // Check if we're still on the same page by comparing screenshots
           const newScreenshot = await page.screenshot({
             fullPage: true,
-            type: 'png',
+            type: 'jpeg',
+            quality: 80,
             encoding: 'binary'
           });
           
@@ -730,7 +732,8 @@ async function convertDocSendToPDF(url) {
       // Take screenshot of current page
       const screenshot = await page.screenshot({
         fullPage: true,
-        type: 'png',
+        type: 'jpeg',
+        quality: 80,
         encoding: 'binary'
       });
       
@@ -754,7 +757,8 @@ async function convertDocSendToPDF(url) {
         // Check if we're still on the same page by comparing screenshots
         const newScreenshot = await page.screenshot({
           fullPage: true,
-          type: 'png',
+          type: 'jpeg',
+          quality: 80,
           encoding: 'binary'
         });
         
@@ -787,6 +791,10 @@ async function createPDFFromScreenshots(screenshots) {
   console.log('Creating PDF from screenshots...');
   const pdfDoc = await PDFDocument.create();
   
+  // Set PDF compression options
+  pdfDoc.setProducer('DocSend Slack Bot');
+  pdfDoc.setCreator('DocSend Slack Bot');
+  
   for (let i = 0; i < screenshots.length; i++) {
     console.log(`Processing screenshot ${i + 1} of ${screenshots.length}...`);
     
@@ -797,22 +805,22 @@ async function createPDFFromScreenshots(screenshots) {
     console.log(`Screenshot ${i + 1} buffer size: ${screenshots[i].length} bytes`);
     
     try {
-      // Load the PNG image
-      const pngImage = await pdfDoc.embedPng(screenshots[i]);
-      console.log(`Successfully loaded PNG image ${i + 1}, dimensions: ${pngImage.width}x${pngImage.height}`);
+      // Load the JPEG image
+      const jpegImage = await pdfDoc.embedJpg(screenshots[i]);
+      console.log(`Successfully loaded JPEG image ${i + 1}, dimensions: ${jpegImage.width}x${jpegImage.height}`);
       
       // Add a new page with the same dimensions as the image
-      const page = pdfDoc.addPage([pngImage.width, pngImage.height]);
+      const page = pdfDoc.addPage([jpegImage.width, jpegImage.height]);
       
       // Draw the image on the page
-      page.drawImage(pngImage, {
+      page.drawImage(jpegImage, {
         x: 0,
         y: 0,
-        width: pngImage.width,
-        height: pngImage.height,
+        width: jpegImage.width,
+        height: jpegImage.height,
       });
       
-      console.log(`Successfully added page ${i + 1} as PNG`);
+      console.log(`Successfully added page ${i + 1} as JPEG`);
     } catch (error) {
       console.error(`Error processing screenshot ${i + 1}:`, error);
       throw new Error(`Failed to process screenshot ${i + 1}: ${error.message}`);
@@ -821,7 +829,11 @@ async function createPDFFromScreenshots(screenshots) {
   
   console.log('Saving PDF...');
   try {
-    const pdfBytes = await pdfDoc.save();
+    // Save with compression options
+    const pdfBytes = await pdfDoc.save({
+      useObjectStreams: true,
+      addDefaultPage: false
+    });
     const pdfBuffer = Buffer.from(pdfBytes);  // Convert Uint8Array to Buffer
     
     console.log('PDF created successfully, size:', pdfBuffer.length, 'bytes');
