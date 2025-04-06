@@ -590,9 +590,17 @@ async function convertDocSendToPDF(url) {
         // Document has multiple pages
         let pageNumber = 1;
         let hasNextPage = true;
+        const MAX_PAGES = 3;
         
-        while (hasNextPage) {
-          console.log(`Capturing page ${pageNumber}...`);
+        while (hasNextPage && pageNumber <= MAX_PAGES) {
+          console.log(`Capturing page ${pageNumber} of max ${MAX_PAGES}...`);
+          
+          // Click center of page to ensure focus
+          const viewport = await page.viewport();
+          const centerX = viewport.width / 2;
+          const centerY = viewport.height / 2;
+          await page.mouse.click(centerX, centerY);
+          console.log('Clicked center of page for focus');
           
           // Take screenshot of current page
           const screenshot = await page.screenshot({
@@ -609,25 +617,28 @@ async function convertDocSendToPDF(url) {
           console.log('Screenshot captured successfully, size:', screenshot.length, 'bytes');
           screenshots.push(screenshot);
           
-          // Try to go to next page
+          // Try to go to next page using arrow key
           try {
-            await page.evaluate((selector) => {
-              const button = document.querySelector(selector);
-              if (button) {
-                button.click();
-                return true;
-              }
-              return false;
-            }, pageNavSelectors[0]);
+            console.log('Pressing ArrowRight key for next page...');
+            await page.keyboard.press('ArrowRight');
+            console.log('Successfully pressed ArrowRight key');
             
-            await page.waitForTimeout(2000); // Wait for page transition
+            // Wait for page transition
+            await page.waitForTimeout(2000);
             
-            // Check if we're still on the same page
-            const newNextButton = await page.$(pageNavSelectors[0]);
-            if (!newNextButton || newNextButton === nextButton) {
+            // Check if we're still on the same page by comparing screenshots
+            const newScreenshot = await page.screenshot({
+              fullPage: true,
+              type: 'png',
+              encoding: 'binary'
+            });
+            
+            // If screenshots are identical, we're on the same page
+            if (Buffer.compare(screenshot, newScreenshot) === 0) {
+              console.log('Screenshots match, no page change detected');
               hasNextPage = false;
             } else {
-              nextButton = newNextButton;
+              console.log('New page detected');
               pageNumber++;
             }
           } catch (error) {
