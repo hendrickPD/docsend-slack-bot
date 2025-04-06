@@ -37,6 +37,26 @@ expressApp.use((req, res, next) => {
 // Track processed messages to prevent duplicates
 const processedMessages = new Set();
 
+// Health check function
+async function checkHealth() {
+  console.log('Running health check...');
+  
+  // Check for required environment variables
+  const requiredEnvVars = [
+    'SLACK_BOT_TOKEN',
+    'SLACK_SIGNING_SECRET',
+    'DOCSEND_EMAIL',
+    'PORT'
+  ];
+  
+  const missingVars = requiredEnvVars.filter(varName => !process.env[varName]);
+  if (missingVars.length > 0) {
+    throw new Error(`Missing required environment variables: ${missingVars.join(', ')}`);
+  }
+  
+  console.log('Health check passed');
+}
+
 // Health check endpoint (handles both GET and HEAD)
 expressApp.get('/', (req, res) => {
   res.send('DocSend to PDF Slack Bot is running!');
@@ -497,73 +517,7 @@ async function convertDocSendToPDF(url) {
       // Wait a bit for any dynamic content to load
       await page.waitForTimeout(5000);
       
-      // Check for direct PDF link
-      console.log('Checking for direct PDF link...');
-      const directPdfLink = await page.evaluate(() => {
-        // Look for various types of PDF download links
-        const selectors = [
-          'a[href$=".pdf"]',
-          'a[download]',
-          'a[href*="download"]',
-          'a[href*="pdf"]',
-          'button[onclick*="download"]',
-          'button[onclick*="pdf"]'
-        ];
-        
-        for (const selector of selectors) {
-          const element = document.querySelector(selector);
-          if (element) {
-            // For buttons, try to get the download URL from onclick handler
-            if (element.tagName.toLowerCase() === 'button' && element.onclick) {
-              const onclickText = element.onclick.toString();
-              const urlMatch = onclickText.match(/['"](https?:\/\/[^'"]+)['"]/);
-              if (urlMatch) {
-                return urlMatch[1];
-              }
-            }
-            // For links, get the href
-            return element.href || element.getAttribute('href');
-          }
-        }
-        return null;
-      });
-      
-      if (directPdfLink) {
-        console.log('Direct PDF link found:', directPdfLink);
-        
-        // Download the PDF using node-fetch
-        const fetch = require('node-fetch');
-        try {
-          const response = await fetch(directPdfLink, {
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (compatible; Bot/1.0)',
-              'Accept': 'application/pdf,application/x-pdf,application/octet-stream',
-              'Referer': url
-            }
-          });
-          
-          if (!response.ok) {
-            throw new Error(`Failed to download PDF: ${response.status} ${response.statusText}`);
-          }
-          
-          const pdfBuffer = await response.buffer();
-          console.log('Direct PDF download successful, size:', pdfBuffer.length, 'bytes');
-          
-          // Verify PDF buffer is valid
-          if (!pdfBuffer || !Buffer.isBuffer(pdfBuffer) || pdfBuffer.length === 0) {
-            throw new Error('Invalid PDF buffer downloaded');
-          }
-          
-          return pdfBuffer;
-        } catch (downloadError) {
-          console.error('Error downloading PDF directly:', downloadError);
-          console.log('Falling back to screenshot capture...');
-        }
-      } else {
-        console.log('No direct PDF link found, proceeding with screenshot capture');
-      }
-      
-      // Continue with screenshot capture if direct download failed or not available
+      // Capture screenshots of each page
       console.log('Capturing document pages...');
       const screenshots = [];
       
@@ -1025,10 +979,20 @@ expressApp.post('/slack/events', (req, res) => {
 });
 
 // Start the Express server
-const port = process.env.PORT || 10000;
-expressApp.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
-});
+(async () => {
+  try {
+    // Run health check
+    await checkHealth();
+    
+    // Start Express server
+    app.listen(process.env.PORT, () => {
+      console.log(`Server is running on port ${process.env.PORT}`);
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+})();
 
 // Start the Slack app
 app.start().then(() => {
