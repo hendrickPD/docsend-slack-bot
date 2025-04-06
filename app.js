@@ -229,45 +229,97 @@ async function convertDocSendToPDF(url) {
       // Hide cookie banners and overlays
       console.log('Hiding cookie banners and overlays...');
       await targetFrame.evaluate(() => {
-        const bannerSelectors = [
-          '.cookie-banner',
-          '.cookie-consent',
-          '.cookie-acceptance',
-          '.gdpr-banner',
-          '.privacy-banner',
-          '.overlay',
-          '.modal',
-          '.popup',
-          // Add more specific DocSend overlays
-          '[class*="cookie"]',
-          '[class*="banner"]',
-          '[class*="overlay"]',
-          '[class*="modal"]',
-          '[class*="popup"]',
-          '[class*="privacy"]',
-          '[class*="gdpr"]',
-          '[class*="consent"]',
-          '[class*="acceptance"]',
-          // Add data attributes
-          '[data-testid*="cookie"]',
-          '[data-testid*="banner"]',
-          '[data-testid*="overlay"]',
-          '[data-testid*="modal"]',
-          '[data-testid*="popup"]',
-          '[data-testid*="privacy"]',
-          '[data-testid*="gdpr"]',
-          '[data-testid*="consent"]',
-          '[data-testid*="acceptance"]'
-        ];
+        // First try to find and click the close button
+        const closeButton = document.querySelector('button[aria-label="Close"], button[class*="close"], button[class*="dismiss"]');
+        if (closeButton) {
+          closeButton.click();
+          console.log('Clicked cookie banner close button');
+        }
         
-        bannerSelectors.forEach(selector => {
-          const elements = document.querySelectorAll(selector);
-          elements.forEach(element => {
-            element.style.display = 'none';
-            console.log(`Hidden ${selector}`);
-          });
-        });
+        // Then hide any remaining cookie elements
+        const style = document.createElement('style');
+        style.textContent = `
+          /* DocSend-specific cookie banner */
+          div[class*="cookie-banner"],
+          div[class*="cookie-notice"],
+          div[class*="cookie-modal"],
+          div[class*="cookie-overlay"],
+          div[class*="cookie-dialog"],
+          div[class*="cookie-policy"],
+          /* More specific DocSend selectors */
+          div[class*="docsend-cookie"],
+          div[class*="docsend-banner"],
+          div[class*="docsend-notice"],
+          div[class*="docsend-modal"],
+          div[class*="docsend-overlay"],
+          div[class*="docsend-dialog"],
+          div[class*="docsend-policy"],
+          /* Common cookie banner patterns */
+          div[class*="cookie"],
+          div[class*="consent"],
+          div[class*="banner"],
+          div[class*="notice"],
+          div[class*="modal"],
+          div[class*="overlay"],
+          div[class*="dialog"],
+          div[class*="policy"] {
+            display: none !important;
+            visibility: hidden !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+            position: absolute !important;
+            top: -9999px !important;
+            left: -9999px !important;
+            z-index: -9999 !important;
+          }
+          
+          /* Ensure document content is visible */
+          .document-content {
+            position: relative !important;
+            z-index: 1 !important;
+          }
+        `;
+        document.head.appendChild(style);
+        console.log('Injected CSS to hide cookie banner');
       });
+      
+      // Wait for CSS to take effect
+      await page.waitForTimeout(500);
+      
+      // Try to find and click the "Accept All Cookies" button using XPath
+      console.log('Looking for Accept All Cookies button...');
+      const acceptButtonXPaths = [
+        "//button[contains(., 'Accept All Cookies')]",
+        "//button[contains(., 'Accept all cookies')]",
+        "//button[contains(., 'Accept All')]",
+        "//button[contains(., 'Accept all')]",
+        "//button[contains(., 'Accept')]",
+        "//button[contains(., 'Allow All')]",
+        "//button[contains(., 'Allow all')]",
+        "//button[contains(., 'Allow')]"
+      ];
+      
+      let acceptButtonFound = false;
+      for (const xpath of acceptButtonXPaths) {
+        try {
+          const [acceptButton] = await page.$x(xpath);
+          if (acceptButton) {
+            await acceptButton.click();
+            console.log(`Clicked Accept button found with XPath: ${xpath}`);
+            acceptButtonFound = true;
+            break;
+          }
+        } catch (error) {
+          console.log(`Error clicking Accept button with XPath ${xpath}:`, error);
+        }
+      }
+      
+      if (!acceptButtonFound) {
+        console.log('No Accept All Cookies button found');
+      }
+      
+      // Wait for any cookie-related changes to take effect
+      await page.waitForTimeout(1000);
       
       // Try finding button by text using XPath first
       console.log('Trying to find button by text using XPath...');
