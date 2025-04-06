@@ -713,77 +713,21 @@ async function convertDocSendToPDF(url) {
     console.log('Capturing document pages...');
     const screenshots = [];
     
-    // Try to find page navigation elements
-    const pageNavSelectors = [
-      'button[aria-label*="next" i]',
-      'button[aria-label*="Next" i]',
-      'button[class*="next" i]',
-      'button[class*="Next" i]',
-      'div[class*="next" i]',
-      'div[class*="Next" i]'
-    ];
+    // Document has multiple pages
+    let pageNumber = 1;
+    let hasNextPage = true;
     
-    let nextButton = null;
-    for (const selector of pageNavSelectors) {
-      nextButton = await page.$(selector);
-      if (nextButton) {
-        console.log('Found next button with selector:', selector);
-        break;
-      }
-    }
-    
-    if (nextButton) {
-      // Document has multiple pages
-      let pageNumber = 1;
-      let hasNextPage = true;
+    while (hasNextPage) {
+      console.log(`Capturing page ${pageNumber}...`);
       
-      while (hasNextPage) {
-        console.log(`Capturing page ${pageNumber}...`);
-        
-        // Take screenshot of current page
-        const screenshot = await page.screenshot({
-          fullPage: true,
-          type: 'png',
-          encoding: 'binary'
-        });
-        
-        // Verify screenshot is valid
-        if (!screenshot || !Buffer.isBuffer(screenshot) || screenshot.length === 0) {
-          throw new Error(`Failed to capture screenshot for page ${pageNumber}`);
-        }
-        
-        console.log('Screenshot captured successfully, size:', screenshot.length, 'bytes');
-        screenshots.push(screenshot);
-        
-        // Try to go to next page
-        try {
-          await page.evaluate((selector) => {
-            const button = document.querySelector(selector);
-            if (button) {
-              button.click();
-              return true;
-            }
-            return false;
-          }, pageNavSelectors[0]);
-          
-          await page.waitForTimeout(2000); // Wait for page transition
-          
-          // Check if we're still on the same page
-          const newNextButton = await page.$(pageNavSelectors[0]);
-          if (!newNextButton || newNextButton === nextButton) {
-            hasNextPage = false;
-          } else {
-            nextButton = newNextButton;
-            pageNumber++;
-          }
-        } catch (error) {
-          console.log('Error navigating to next page:', error);
-          hasNextPage = false;
-        }
-      }
-    } else {
-      // Single page document
-      console.log('Capturing single page document...');
+      // Click center of page to ensure focus
+      const viewport = await page.viewport();
+      const centerX = viewport.width / 2;
+      const centerY = viewport.height / 2;
+      await page.mouse.click(centerX, centerY);
+      console.log('Clicked center of page for focus');
+      
+      // Take screenshot of current page
       const screenshot = await page.screenshot({
         fullPage: true,
         type: 'png',
@@ -792,11 +736,40 @@ async function convertDocSendToPDF(url) {
       
       // Verify screenshot is valid
       if (!screenshot || !Buffer.isBuffer(screenshot) || screenshot.length === 0) {
-        throw new Error('Failed to capture screenshot for single page document');
+        throw new Error(`Failed to capture screenshot for page ${pageNumber}`);
       }
       
       console.log('Screenshot captured successfully, size:', screenshot.length, 'bytes');
       screenshots.push(screenshot);
+      
+      // Try to go to next page using arrow key
+      try {
+        console.log('Pressing ArrowRight key for next page...');
+        await page.keyboard.press('ArrowRight');
+        console.log('Successfully pressed ArrowRight key');
+        
+        // Wait for page transition
+        await page.waitForTimeout(2000);
+        
+        // Check if we're still on the same page by comparing screenshots
+        const newScreenshot = await page.screenshot({
+          fullPage: true,
+          type: 'png',
+          encoding: 'binary'
+        });
+        
+        // If screenshots are identical, we're on the same page
+        if (Buffer.compare(screenshot, newScreenshot) === 0) {
+          console.log('Screenshots match, no page change detected');
+          hasNextPage = false;
+        } else {
+          console.log('New page detected');
+          pageNumber++;
+        }
+      } catch (error) {
+        console.log('Error navigating to next page:', error);
+        hasNextPage = false;
+      }
     }
     
     console.log(`Captured ${screenshots.length} pages successfully`);
