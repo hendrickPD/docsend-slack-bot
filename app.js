@@ -570,10 +570,9 @@ async function convertDocSendToPDF(url) {
       // Document has multiple pages
       let pageNumber = 1;
       let hasNextPage = true;
-      const MAX_PAGES = 3;
       
-      while (hasNextPage && pageNumber <= MAX_PAGES) {
-        console.log(`Capturing page ${pageNumber} of max ${MAX_PAGES}...`);
+      while (hasNextPage) {
+        console.log(`Capturing page ${pageNumber}...`);
         
         // Click center of page to ensure focus
         const viewport = await page.viewport();
