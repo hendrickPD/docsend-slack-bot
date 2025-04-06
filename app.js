@@ -228,130 +228,48 @@ async function convertDocSendToPDF(url) {
       
       // Hide cookie banners and overlays
       console.log('Hiding cookie banners and overlays...');
-      await targetFrame.evaluate(() => {
-        // First try to find and click the close button
-        const closeButton = document.querySelector('button[aria-label="Close"], button[class*="close"], button[class*="dismiss"]');
-        if (closeButton) {
-          closeButton.click();
-          console.log('Clicked cookie banner close button');
-        }
-        
-        // Then hide any remaining cookie elements
-        const style = document.createElement('style');
-        style.textContent = `
-          /* DocSend-specific cookie banner */
-          div[class*="cookie-banner"],
-          div[class*="cookie-notice"],
-          div[class*="cookie-modal"],
-          div[class*="cookie-overlay"],
-          div[class*="cookie-dialog"],
-          div[class*="cookie-policy"],
-          /* More specific DocSend selectors */
-          div[class*="docsend-cookie"],
-          div[class*="docsend-banner"],
-          div[class*="docsend-notice"],
-          div[class*="docsend-modal"],
-          div[class*="docsend-overlay"],
-          div[class*="docsend-dialog"],
-          div[class*="docsend-policy"],
-          /* Common cookie banner patterns */
-          div[class*="cookie"],
-          div[class*="consent"],
-          div[class*="banner"],
-          div[class*="notice"],
-          div[class*="modal"],
-          div[class*="overlay"],
-          div[class*="dialog"],
-          div[class*="policy"] {
-            display: none !important;
-            visibility: hidden !important;
-            opacity: 0 !important;
-            pointer-events: none !important;
-            position: absolute !important;
-            top: -9999px !important;
-            left: -9999px !important;
-            z-index: -9999 !important;
-          }
-          
-          /* Ensure document content is visible */
-          .document-content {
-            position: relative !important;
-            z-index: 1 !important;
-          }
-        `;
-        document.head.appendChild(style);
-        console.log('Injected CSS to hide cookie banner');
-      });
       
-      // Wait for CSS to take effect
-      await page.waitForTimeout(500);
-      
-      // Try to find and click the "Accept All Cookies" button using multiple approaches
-      console.log('Looking for Accept All Cookies button...');
-      const acceptButtonSelectors = [
-        // XPath selectors
-        "//button[contains(., 'Accept All Cookies')]",
-        "//button[contains(., 'Accept all cookies')]",
-        "//button[contains(., 'Accept All')]",
-        "//button[contains(., 'Accept all')]",
-        "//button[contains(., 'Accept')]",
-        "//button[contains(., 'Allow All')]",
-        "//button[contains(., 'Allow all')]",
-        "//button[contains(., 'Allow')]",
-        // CSS selectors
-        "button[aria-label*='Accept']",
-        "button[aria-label*='Allow']",
-        "button[class*='accept']",
-        "button[class*='allow']",
-        "button[class*='cookie']",
-        "button[class*='consent']",
-        "button[class*='banner']",
-        "button[class*='notice']",
-        "button[class*='modal']",
-        "button[class*='overlay']",
-        "button[class*='dialog']",
-        "button[class*='policy']",
-        // More specific DocSend selectors
-        "button[class*='docsend-cookie']",
-        "button[class*='docsend-banner']",
-        "button[class*='docsend-notice']",
-        "button[class*='docsend-modal']",
-        "button[class*='docsend-overlay']",
-        "button[class*='docsend-dialog']",
-        "button[class*='docsend-policy']"
+      // First try to find and click the cookie banner in the main frame
+      console.log('Looking for cookie banner in main frame...');
+      const cookieBannerSelectors = [
+        // Common cookie banner containers
+        'div[class*="cookie-banner"]',
+        'div[class*="cookie-notice"]',
+        'div[class*="cookie-modal"]',
+        'div[class*="cookie-overlay"]',
+        'div[class*="cookie-dialog"]',
+        'div[class*="cookie-policy"]',
+        // DocSend-specific containers
+        'div[class*="docsend-cookie"]',
+        'div[class*="docsend-banner"]',
+        'div[class*="docsend-notice"]',
+        'div[class*="docsend-modal"]',
+        'div[class*="docsend-overlay"]',
+        'div[class*="docsend-dialog"]',
+        'div[class*="docsend-policy"]'
       ];
       
-      let acceptButtonFound = false;
+      let cookieBannerFound = false;
       let retryCount = 0;
-      const maxRetries = 3;
+      const maxRetries = 5;
       
-      while (!acceptButtonFound && retryCount < maxRetries) {
-        for (const selector of acceptButtonSelectors) {
+      while (!cookieBannerFound && retryCount < maxRetries) {
+        // Wait for any dynamic content to load
+        await page.waitForTimeout(1000);
+        
+        // Check main frame first
+        for (const selector of cookieBannerSelectors) {
           try {
-            let button;
-            if (selector.startsWith('//')) {
-              // XPath selector
-              [button] = await page.$x(selector);
-            } else {
-              // CSS selector
-              button = await page.$(selector);
-            }
-            
-            if (button) {
-              // Ensure button is visible and clickable
-              const isVisible = await button.evaluate(el => {
-                const style = window.getComputedStyle(el);
-                return style.display !== 'none' && 
-                       style.visibility !== 'hidden' && 
-                       style.opacity !== '0' &&
-                       el.offsetWidth > 0 &&
-                       el.offsetHeight > 0;
-              });
+            const banner = await page.$(selector);
+            if (banner) {
+              console.log(`Found cookie banner with selector: ${selector}`);
               
-              if (isVisible) {
-                await button.click();
-                console.log(`Clicked Accept button found with selector: ${selector}`);
-                acceptButtonFound = true;
+              // Try to find and click the accept button within the banner
+              const acceptButton = await banner.$('button[aria-label*="Accept"], button[aria-label*="Allow"], button[class*="accept"], button[class*="allow"]');
+              if (acceptButton) {
+                await acceptButton.click();
+                console.log('Clicked accept button within cookie banner');
+                cookieBannerFound = true;
                 break;
               }
             }
@@ -360,17 +278,43 @@ async function convertDocSendToPDF(url) {
           }
         }
         
-        if (!acceptButtonFound) {
+        // If not found in main frame, check all frames
+        if (!cookieBannerFound) {
+          const frames = page.frames();
+          for (const frame of frames) {
+            for (const selector of cookieBannerSelectors) {
+              try {
+                const banner = await frame.$(selector);
+                if (banner) {
+                  console.log(`Found cookie banner in frame with selector: ${selector}`);
+                  
+                  // Try to find and click the accept button within the banner
+                  const acceptButton = await banner.$('button[aria-label*="Accept"], button[aria-label*="Allow"], button[class*="accept"], button[class*="allow"]');
+                  if (acceptButton) {
+                    await acceptButton.click();
+                    console.log('Clicked accept button within cookie banner in frame');
+                    cookieBannerFound = true;
+                    break;
+                  }
+                }
+              } catch (error) {
+                console.log(`Error with selector ${selector} in frame:`, error);
+              }
+            }
+            if (cookieBannerFound) break;
+          }
+        }
+        
+        if (!cookieBannerFound) {
           retryCount++;
           if (retryCount < maxRetries) {
-            console.log(`Retry ${retryCount}/${maxRetries} to find Accept button...`);
-            await page.waitForTimeout(1000);
+            console.log(`Retry ${retryCount}/${maxRetries} to find cookie banner...`);
           }
         }
       }
       
-      if (!acceptButtonFound) {
-        console.log('No Accept All Cookies button found after all attempts');
+      if (!cookieBannerFound) {
+        console.log('No cookie banner found after all attempts');
       }
       
       // Wait for any cookie-related changes to take effect
