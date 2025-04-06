@@ -570,9 +570,32 @@ async function convertDocSendToPDF(url) {
       // Document has multiple pages
       let pageNumber = 1;
       let hasNextPage = true;
+      let lastPageNumber = null;
       
       while (hasNextPage) {
         console.log(`Capturing page ${pageNumber}...`);
+        
+        // Get current page number from the page number element
+        const currentPageNumber = await page.evaluate(() => {
+          const pageNumberElement = document.querySelector('span[aria-label="page number"]');
+          if (pageNumberElement) {
+            return parseInt(pageNumberElement.textContent, 10);
+          }
+          return null;
+        });
+        
+        if (currentPageNumber) {
+          console.log(`Current page number: ${currentPageNumber}`);
+          
+          // If we've seen this page number before, we've reached the end
+          if (lastPageNumber === currentPageNumber) {
+            console.log('Reached the end of the document (same page number detected)');
+            hasNextPage = false;
+            break;
+          }
+          
+          lastPageNumber = currentPageNumber;
+        }
         
         // Click center of page to ensure focus
         const viewport = await page.viewport();
@@ -606,21 +629,39 @@ async function convertDocSendToPDF(url) {
           // Wait for page transition
           await page.waitForTimeout(2000);
           
-          // Check if we're still on the same page by comparing screenshots
-          const newScreenshot = await page.screenshot({
-            fullPage: true,
-            type: 'jpeg',
-            quality: 80,
-            encoding: 'binary'
+          // Get new page number after navigation
+          const newPageNumber = await page.evaluate(() => {
+            const pageNumberElement = document.querySelector('span[aria-label="page number"]');
+            if (pageNumberElement) {
+              return parseInt(pageNumberElement.textContent, 10);
+            }
+            return null;
           });
           
-          // If screenshots are identical, we're on the same page
-          if (Buffer.compare(screenshot, newScreenshot) === 0) {
-            console.log('Screenshots match, no page change detected');
-            hasNextPage = false;
+          if (newPageNumber) {
+            console.log(`New page number: ${newPageNumber}`);
+            if (newPageNumber === currentPageNumber) {
+              console.log('Page number unchanged, reached end of document');
+              hasNextPage = false;
+            } else {
+              pageNumber++;
+            }
           } else {
-            console.log('New page detected');
-            pageNumber++;
+            // If we can't get the page number, fall back to screenshot comparison
+            const newScreenshot = await page.screenshot({
+              fullPage: true,
+              type: 'jpeg',
+              quality: 80,
+              encoding: 'binary'
+            });
+            
+            if (Buffer.compare(screenshot, newScreenshot) === 0) {
+              console.log('Screenshots match, no page change detected');
+              hasNextPage = false;
+            } else {
+              console.log('New page detected');
+              pageNumber++;
+            }
           }
         } catch (error) {
           console.log('Error navigating to next page:', error);
