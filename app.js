@@ -527,10 +527,15 @@ async function convertDocSendToPDF(url) {
           'header',
           '.header',
           '.top-bar',
-          '.navigation',
-          '.nav',
-          '.toolbar',
-          '.controls'
+          '.header-bar-container',
+          '.presentation-toolbar',
+          '.toolbar-logo',
+          '.presentation-toolbar_buttons',
+          '.toolbar-page-indicator',
+          '.toolbar-button',
+          '.toolbar-rule',
+          '.positioned-context',
+          '.toolbar-popover'
         ];
         
         // Hide bottom navigation elements
@@ -574,10 +579,15 @@ async function convertDocSendToPDF(url) {
           'header',
           '.header',
           '.top-bar',
-          '.navigation',
-          '.nav',
-          '.toolbar',
-          '.controls'
+          '.header-bar-container',
+          '.presentation-toolbar',
+          '.toolbar-logo',
+          '.presentation-toolbar_buttons',
+          '.toolbar-page-indicator',
+          '.toolbar-button',
+          '.toolbar-rule',
+          '.positioned-context',
+          '.toolbar-popover'
         ];
         
         // Hide bottom navigation elements
@@ -669,10 +679,15 @@ async function convertDocSendToPDF(url) {
             'header',
             '.header',
             '.top-bar',
-            '.navigation',
-            '.nav',
-            '.toolbar',
-            '.controls'
+            '.header-bar-container',
+            '.presentation-toolbar',
+            '.toolbar-logo',
+            '.presentation-toolbar_buttons',
+            '.toolbar-page-indicator',
+            '.toolbar-button',
+            '.toolbar-rule',
+            '.positioned-context',
+            '.toolbar-popover'
           ];
           
           // Hide bottom navigation elements
@@ -875,10 +890,15 @@ async function convertDocSendToPDF(url) {
           'header',
           '.header',
           '.top-bar',
-          '.navigation',
-          '.nav',
-          '.toolbar',
-          '.controls'
+          '.header-bar-container',
+          '.presentation-toolbar',
+          '.toolbar-logo',
+          '.presentation-toolbar_buttons',
+          '.toolbar-page-indicator',
+          '.toolbar-button',
+          '.toolbar-rule',
+          '.positioned-context',
+          '.toolbar-popover'
         ];
         
         // Hide bottom navigation elements
