@@ -228,9 +228,15 @@ async function convertDocSendToPDF(url, messageText) {
     }
     
     // Check if this is a document that requires a password based on message content
-    // Only check for password if both DocSend link and pw: are present
-    const requiresPassword = messageText.toLowerCase().includes('pw:') && url.includes('docsend.com');
-    const docsendPassword = requiresPassword ? 'landofthefr33' : null;
+    // Extract password from message if present
+    let docsendPassword = null;
+    if (messageText.toLowerCase().includes('pw:')) {
+      const passwordMatch = messageText.match(/pw:([^\s]+)/i);
+      if (passwordMatch && passwordMatch[1]) {
+        docsendPassword = passwordMatch[1];
+        console.log('Extracted password from message');
+      }
+    }
     
     // Enter email and submit form
     try {
@@ -354,7 +360,7 @@ async function convertDocSendToPDF(url, messageText) {
       }
 
       // Only handle password for the specific document ID
-      if (requiresPassword && url.includes('pmfv4ph82dsfjeg6')) {
+      if (docsendPassword && url.includes('pmfv4ph82dsfjeg6')) {
         console.log('Password required for specific document. Using original workflow for password entry...');
         
         // Try to find the password field using multiple selectors
