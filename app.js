@@ -430,8 +430,8 @@ async function convertDocSendToPDF(url) {
           throw new Error('Could not find password input field with any selector');
         }
         
-        // Enter password using the same method as email
-        await targetFrame.type('input[name="link_auth_form[passcode]"]', docsendPassword);
+        // Enter password using the element handle directly
+        await passwordInput.type(docsendPassword);
         console.log('Entered password in form');
         
         // Use the same continue button logic as before
