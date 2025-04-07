@@ -356,37 +356,87 @@ async function convertDocSendToPDF(url) {
       if (requiresPassword && url.includes('pmfv4ph82dsfjeg6')) {
         console.log('Password required for specific document. Using original workflow for password entry...');
         
-        // Re-find the target frame after navigation
-        console.log('Re-finding target frame after navigation...');
-        const frames = await page.frames();
+        // Take a screenshot of the current state
+        await page.screenshot({ path: 'before-password.png', fullPage: true });
+        console.log('Took screenshot of page state before password entry');
+        
+        // Try to find the password field using multiple selectors
+        console.log('Trying to find password field with multiple selectors...');
+        const passwordSelectors = [
+          // Specific selectors based on the HTML structure
+          'input[name="link_auth_form[passcode]"]',
+          'input#link_auth_form_passcode',
+          'input.form-control.js-auth-input-validation',
+          
+          // General passcode/password selectors
+          'input[type="text"][name*="passcode"]',
+          'input[type="text"][name*="password"]',
+          'input[type="password"]',
+          'input[name*="passcode"]',
+          'input[name*="password"]',
+          
+          // Placeholder-based selectors
+          'input[placeholder*="passcode" i]',
+          'input[placeholder*="password" i]',
+          'input[placeholder*="pass" i]',
+          
+          // Class-based selectors
+          'input.form-control',
+          'input.js-auth-input-validation',
+          'input.auth-input'
+        ];
+        
+        let passwordInput = null;
         let targetFrame = null;
         
-        for (const frame of frames) {
+        // First try in the main frame
+        for (const selector of passwordSelectors) {
           try {
-            console.log('Checking frame for password input:', frame.url());
-            const passwordInput = await frame.$('input[type="password"]');
+            console.log(`Trying selector in main frame: ${selector}`);
+            passwordInput = await page.$(selector);
             if (passwordInput) {
-              console.log('Found password input in frame:', frame.url());
-              targetFrame = frame;
+              console.log(`Found password input in main frame with selector: ${selector}`);
+              targetFrame = page.mainFrame();
               break;
             }
-          } catch (frameError) {
-            console.log('Error checking frame for password input:', frameError);
+          } catch (error) {
+            console.log(`Error trying selector ${selector} in main frame:`, error);
           }
         }
         
-        if (!targetFrame) {
-          console.log('Could not find frame with password input, using main frame');
-          targetFrame = page.mainFrame();
+        // If not found in main frame, check all frames
+        if (!passwordInput) {
+          console.log('Password input not found in main frame, checking all frames...');
+          const frames = await page.frames();
+          console.log(`Found ${frames.length} frames to check`);
+          
+          for (const frame of frames) {
+            console.log(`Checking frame: ${frame.url()}`);
+            for (const selector of passwordSelectors) {
+              try {
+                console.log(`Trying selector in frame: ${selector}`);
+                passwordInput = await frame.$(selector);
+                if (passwordInput) {
+                  console.log(`Found password input in frame ${frame.url()} with selector: ${selector}`);
+                  targetFrame = frame;
+                  break;
+                }
+              } catch (error) {
+                console.log(`Error trying selector ${selector} in frame ${frame.url()}:`, error);
+              }
+            }
+            if (passwordInput) break;
+          }
         }
         
-        // Wait for password field using the same method as email
-        console.log('Waiting for password input field...');
-        await targetFrame.waitForSelector('input[type="password"]', { timeout: 30000 });
-        console.log('Found password input field');
+        if (!passwordInput) {
+          console.log('Could not find password input with any selector, taking final screenshot');
+          await page.screenshot({ path: 'no-password-found.png', fullPage: true });
+          throw new Error('Could not find password input field with any selector');
+        }
         
         // Enter password using the same method as email
-        await targetFrame.type('input[type="password"]', docsendPassword);
+        await targetFrame.type(passwordInput, docsendPassword);
         console.log('Entered password in form');
         
         // Use the same continue button logic as before
