@@ -431,7 +431,7 @@ async function convertDocSendToPDF(url) {
         }
         
         // Enter password using the same method as email
-        await targetFrame.type(passwordInput, docsendPassword);
+        await targetFrame.type('input[name="link_auth_form[passcode]"]', docsendPassword);
         console.log('Entered password in form');
         
         // Use the same continue button logic as before
