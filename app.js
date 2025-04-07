@@ -238,19 +238,217 @@ async function convertDocSendToPDF(url) {
       await targetFrame.type('input[type="email"]', docsendEmail);
       console.log('Entered email in form');
       
-      if (requiresPassword) {
-        console.log('Password required for this document. Waiting for password input...');
+      // Handle cookie banner and overlays
+      try {
+        await page.evaluate(() => {
+          const cookieBanner = document.querySelector('#onetrust-consent-sdk');
+          if (cookieBanner) cookieBanner.remove();
+        });
+        console.log('Removed cookie banner if present');
+      } catch (error) {
+        console.log('No cookie banner to remove or error removing it:', error);
+      }
+
+      // Try multiple methods to find and click the continue button
+      let continueClicked = false;
+      
+      // Method 1: Try XPath first
+      try {
+        const continueButton = await targetFrame.waitForXPath(
+          "//button[contains(., 'Continue') or contains(., 'View Document')]",
+          { timeout: 5000 }
+        );
+        if (continueButton) {
+          await continueButton.click();
+          console.log('Clicked continue button using XPath');
+          continueClicked = true;
+        }
+      } catch (error) {
+        console.log('XPath method failed:', error);
+      }
+
+      // Method 2: Try CSS selector
+      if (!continueClicked) {
         try {
-          // Wait for the password input
-          await targetFrame.waitForSelector('input[type="password"]', { timeout: 10000 });
-          console.log('Found password input field');
-          
-          // Enter the password
-          await targetFrame.type('input[type="password"]', docsendPassword);
-          console.log('Entered password in form');
+          const continueButton = await targetFrame.waitForSelector(
+            'button:has-text("Continue"), button:has-text("View Document")',
+            { timeout: 5000 }
+          );
+          if (continueButton) {
+            await continueButton.click();
+            console.log('Clicked continue button using CSS selector');
+            continueClicked = true;
+          }
         } catch (error) {
-          console.log('Password input not found or an error occurred:', error);
-          throw new Error('Failed to enter password: ' + error.message);
+          console.log('CSS selector method failed:', error);
+        }
+      }
+
+      // Method 3: Try multiple click methods
+      if (!continueClicked) {
+        try {
+          const buttons = await targetFrame.$$('button');
+          for (const button of buttons) {
+            const text = await targetFrame.evaluate(el => el.textContent, button);
+            if (text.includes('Continue') || text.includes('View Document')) {
+              // Try multiple click methods
+              try {
+                await button.click();
+                console.log('Clicked continue button using basic click');
+                continueClicked = true;
+                break;
+              } catch (clickError) {
+                console.log('Basic click failed, trying evaluate click');
+                try {
+                  await targetFrame.evaluate(el => el.click(), button);
+                  console.log('Clicked continue button using evaluate click');
+                  continueClicked = true;
+                  break;
+                } catch (evaluateError) {
+                  console.log('Evaluate click failed, trying dispatchEvent');
+                  try {
+                    await targetFrame.evaluate(el => {
+                      el.dispatchEvent(new MouseEvent('click', {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window
+                      }));
+                    }, button);
+                    console.log('Clicked continue button using dispatchEvent');
+                    continueClicked = true;
+                    break;
+                  } catch (dispatchError) {
+                    console.log('All click methods failed for this button');
+                  }
+                }
+              }
+            }
+          }
+        } catch (error) {
+          console.log('Button iteration method failed:', error);
+        }
+      }
+
+      if (!continueClicked) {
+        throw new Error('Could not find or click continue button after email entry');
+      }
+
+      // Wait for navigation or content change after email submission
+      try {
+        await Promise.race([
+          page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 30000 }),
+          page.waitForFunction(
+            () => document.querySelector('input[type="password"]') !== null,
+            { timeout: 30000 }
+          )
+        ]);
+        console.log('Navigation or password field detected after email submission');
+      } catch (error) {
+        console.log('No navigation or password field detected after email submission:', error);
+      }
+
+      // Only handle password for the specific document ID
+      if (requiresPassword && url.includes('pmfv4ph82dsfjeg6')) {
+        console.log('Password required for specific document. Using original workflow for password entry...');
+        
+        // Wait for password field using the same method as email
+        await targetFrame.waitForSelector('input[type="password"]', { timeout: 30000 });
+        console.log('Found password input field');
+        
+        // Enter password using the same method as email
+        await targetFrame.type('input[type="password"]', docsendPassword);
+        console.log('Entered password in form');
+        
+        // Use the same continue button logic as before
+        continueClicked = false;
+        
+        // Method 1: Try XPath first
+        try {
+          const continueButton = await targetFrame.waitForXPath(
+            "//button[contains(., 'Continue') or contains(., 'View Document')]",
+            { timeout: 5000 }
+          );
+          if (continueButton) {
+            await continueButton.click();
+            console.log('Clicked continue button using XPath after password');
+            continueClicked = true;
+          }
+        } catch (error) {
+          console.log('XPath method failed after password:', error);
+        }
+
+        // Method 2: Try CSS selector
+        if (!continueClicked) {
+          try {
+            const continueButton = await targetFrame.waitForSelector(
+              'button:has-text("Continue"), button:has-text("View Document")',
+              { timeout: 5000 }
+            );
+            if (continueButton) {
+              await continueButton.click();
+              console.log('Clicked continue button using CSS selector after password');
+              continueClicked = true;
+            }
+          } catch (error) {
+            console.log('CSS selector method failed after password:', error);
+          }
+        }
+
+        // Method 3: Try multiple click methods
+        if (!continueClicked) {
+          try {
+            const buttons = await targetFrame.$$('button');
+            for (const button of buttons) {
+              const text = await targetFrame.evaluate(el => el.textContent, button);
+              if (text.includes('Continue') || text.includes('View Document')) {
+                // Try multiple click methods
+                try {
+                  await button.click();
+                  console.log('Clicked continue button using basic click after password');
+                  continueClicked = true;
+                  break;
+                } catch (clickError) {
+                  console.log('Basic click failed after password, trying evaluate click');
+                  try {
+                    await targetFrame.evaluate(el => el.click(), button);
+                    console.log('Clicked continue button using evaluate click after password');
+                    continueClicked = true;
+                    break;
+                  } catch (evaluateError) {
+                    console.log('Evaluate click failed after password, trying dispatchEvent');
+                    try {
+                      await targetFrame.evaluate(el => {
+                        el.dispatchEvent(new MouseEvent('click', {
+                          bubbles: true,
+                          cancelable: true,
+                          view: window
+                        }));
+                      }, button);
+                      console.log('Clicked continue button using dispatchEvent after password');
+                      continueClicked = true;
+                      break;
+                    } catch (dispatchError) {
+                      console.log('All click methods failed for this button after password');
+                    }
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            console.log('Button iteration method failed after password:', error);
+          }
+        }
+
+        if (!continueClicked) {
+          throw new Error('Could not find or click continue button after password entry');
+        }
+
+        // Wait for navigation after password submission
+        try {
+          await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 30000 });
+          console.log('Navigation completed after password submission');
+        } catch (error) {
+          console.log('No navigation detected after password submission:', error);
         }
       }
       
@@ -346,155 +544,6 @@ async function convertDocSendToPDF(url) {
       
       // Wait for any cookie-related changes to take effect
       await page.waitForTimeout(2000);
-      
-      // Try finding button by text using XPath first
-      console.log('Trying to find button by text using XPath...');
-      const buttonTexts = [
-        'Continue',
-        'Submit',
-        'View Document',
-        'Access Document',
-        'View',
-        'Access',
-        'Proceed',
-        'Next',
-        'Go'
-      ];
-      
-      let buttonFound = false;
-      for (const text of buttonTexts) {
-        try {
-          const [button] = await targetFrame.$x(`//button[contains(., '${text}')] | //input[@type='submit' and contains(@value, '${text}')]`);
-          if (button) {
-            console.log(`Found button with text: ${text}`);
-            
-            // Scroll button into view
-            await targetFrame.evaluate(el => {
-              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            }, button);
-            
-            // Try multiple click methods
-            try {
-              await button.click();
-              console.log('Clicked button using click()');
-              buttonFound = true;
-              break;
-            } catch (e) {
-              console.log('Click() failed, trying dispatchEvent...');
-              await targetFrame.evaluate(el => {
-                el.dispatchEvent(new MouseEvent('click', {
-                  bubbles: true,
-                  cancelable: true,
-                  view: window
-                }));
-              }, button);
-              console.log('Clicked button using dispatchEvent');
-              buttonFound = true;
-              break;
-            }
-          }
-        } catch (error) {
-          console.log(`No button found with text: ${text}`);
-        }
-      }
-      
-      // If XPath search failed, try CSS selectors
-      if (!buttonFound) {
-        console.log('XPath search failed, trying CSS selectors...');
-        const buttonSelectors = [
-          'button[class*="continue"]',
-          'button[type="submit"]',
-          'input[type="submit"]',
-          'button[class*="submit"]',
-          'input[class*="submit"]',
-          'button[class*="button"]',
-          'input[class*="button"]',
-          'button[class*="btn"]',
-          'input[class*="btn"]',
-          'button[class*="primary"]',
-          'input[class*="primary"]',
-          'button[class*="action"]',
-          'input[class*="action"]',
-          // Add more specific DocSend selectors
-          'button[class*="docsend"]',
-          'button[class*="viewer"]',
-          'button[class*="document"]',
-          'button[class*="access"]',
-          'button[class*="proceed"]',
-          'button[class*="next"]',
-          'button[class*="go"]',
-          // Add data attributes
-          'button[data-testid*="submit"]',
-          'button[data-testid*="continue"]',
-          'button[data-testid*="view"]',
-          'button[data-testid*="access"]',
-          'button[data-testid*="proceed"]',
-          'button[data-testid*="next"]',
-          'button[data-testid*="go"]'
-        ];
-        
-        for (const selector of buttonSelectors) {
-          try {
-            console.log(`Checking for button with selector: ${selector}`);
-            
-            // Wait for button to be visible
-            await targetFrame.waitForSelector(selector, { 
-              visible: true,
-              timeout: 10000 
-            });
-            console.log(`Found visible button with selector: ${selector}`);
-            
-            // Wait for button to be enabled
-            await targetFrame.waitForFunction(
-              (sel) => {
-                const button = document.querySelector(sel);
-                return button && !button.disabled;
-              },
-              { timeout: 10000 },
-              selector
-            );
-            console.log(`Button is enabled: ${selector}`);
-            
-            // Scroll button into view and click
-            const clicked = await targetFrame.evaluate((sel) => {
-              const button = document.querySelector(sel);
-              if (button) {
-                // Scroll into view
-                button.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                
-                // Try multiple click methods
-                try {
-                  button.click();
-                  console.log('Clicked button using click()');
-                  return true;
-                } catch (e) {
-                  console.log('Click() failed, trying dispatchEvent...');
-                  button.dispatchEvent(new MouseEvent('click', {
-                    bubbles: true,
-                    cancelable: true,
-                    view: window
-                  }));
-                  console.log('Clicked button using dispatchEvent');
-                  return true;
-                }
-              }
-              return false;
-            }, selector);
-            
-            if (clicked) {
-              console.log(`Successfully clicked button with selector: ${selector}`);
-              buttonFound = true;
-              break;
-            }
-          } catch (error) {
-            console.log(`Button not found or not clickable with selector: ${selector}`, error);
-          }
-        }
-      }
-      
-      if (!buttonFound) {
-        throw new Error('Could not find or click any submit button');
-      }
       
       // Wait for navigation or content change
       console.log('Waiting for page navigation or content change...');
