@@ -109,7 +109,7 @@ const verifySlackRequest = (req) => {
 };
 
 // Function to convert DocSend to PDF
-async function convertDocSendToPDF(url) {
+async function convertDocSendToPDF(url, messageText) {
   console.log('Starting document capture for:', url);
   
   const browser = await puppeteer.launch({
@@ -228,7 +228,8 @@ async function convertDocSendToPDF(url) {
     }
     
     // Check if this is a document that requires a password based on message content
-    const requiresPassword = messageText.toLowerCase().includes('pw:');
+    // Only check for password if both DocSend link and pw: are present
+    const requiresPassword = messageText.toLowerCase().includes('pw:') && url.includes('docsend.com');
     const docsendPassword = requiresPassword ? 'landofthefr33' : null;
     
     // Enter email and submit form
@@ -1094,7 +1095,7 @@ expressApp.post('/slack/events', (req, res) => {
           }).catch(console.error);
           
           // Convert to screenshots and create PDF
-          convertDocSendToPDF(docsendUrl)
+          convertDocSendToPDF(docsendUrl, messageText)
             .then(async (screenshots) => {
               console.log(`Captured ${screenshots.length} pages, creating PDF...`);
               
