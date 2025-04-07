@@ -335,6 +335,7 @@ async function convertDocSendToPDF(url) {
 
       // Wait for navigation or content change after email submission
       try {
+        console.log('Waiting for navigation or password field after email submission...');
         await Promise.race([
           page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 30000 }),
           page.waitForFunction(
@@ -343,6 +344,10 @@ async function convertDocSendToPDF(url) {
           )
         ]);
         console.log('Navigation or password field detected after email submission');
+        
+        // Wait a bit longer for the page to stabilize
+        await page.waitForTimeout(5000);
+        console.log('Additional wait completed after email submission');
       } catch (error) {
         console.log('No navigation or password field detected after email submission:', error);
       }
@@ -351,7 +356,32 @@ async function convertDocSendToPDF(url) {
       if (requiresPassword && url.includes('pmfv4ph82dsfjeg6')) {
         console.log('Password required for specific document. Using original workflow for password entry...');
         
+        // Re-find the target frame after navigation
+        console.log('Re-finding target frame after navigation...');
+        const frames = await page.frames();
+        let targetFrame = null;
+        
+        for (const frame of frames) {
+          try {
+            console.log('Checking frame for password input:', frame.url());
+            const passwordInput = await frame.$('input[type="password"]');
+            if (passwordInput) {
+              console.log('Found password input in frame:', frame.url());
+              targetFrame = frame;
+              break;
+            }
+          } catch (frameError) {
+            console.log('Error checking frame for password input:', frameError);
+          }
+        }
+        
+        if (!targetFrame) {
+          console.log('Could not find frame with password input, using main frame');
+          targetFrame = page.mainFrame();
+        }
+        
         // Wait for password field using the same method as email
+        console.log('Waiting for password input field...');
         await targetFrame.waitForSelector('input[type="password"]', { timeout: 30000 });
         console.log('Found password input field');
         
