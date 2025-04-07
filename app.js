@@ -227,8 +227,8 @@ async function convertDocSendToPDF(url) {
       throw new Error('DOCSEND_EMAIL environment variable is not set');
     }
     
-    // Check if this is a document that requires a password
-    const requiresPassword = url.includes('pmfv4ph82dsfjeg6');
+    // Check if this is a document that requires a password based on message content
+    const requiresPassword = messageText.toLowerCase().includes('pw:');
     const docsendPassword = requiresPassword ? 'landofthefr33' : null;
     
     // Enter email and submit form
