@@ -232,250 +232,360 @@ async function convertDocSendToPDF(url) {
     const docsendPassword = requiresPassword ? 'landofthefr33' : null;
     
     // Enter email and submit form
-    console.log('Entering email and submitting form...');
-    await targetFrame.type('input[type="email"]', docsendEmail);
-    console.log('Entered email in form');
-    
-    if (requiresPassword) {
-      console.log('Password required for this document. Waiting for password input...');
-      try {
-        // Wait for the password input
-        await targetFrame.waitForSelector('input[type="password"]', { timeout: 10000 });
-        console.log('Found password input field');
-        
-        // Enter the password
-        await targetFrame.type('input[type="password"]', docsendPassword);
-        console.log('Entered password in form');
-      } catch (error) {
-        console.log('Password input not found or an error occurred:', error);
-        throw new Error('Failed to enter password: ' + error.message);
-      }
-    }
-    
-    // Try to find and click the continue button
-    console.log('Looking for continue button...');
-    const continueButton = await targetFrame.$('button[type="submit"], input[type="submit"]');
-    if (continueButton) {
-      console.log('Found continue button, attempting to click...');
-      try {
-        await continueButton.click();
-        console.log('Clicked continue button directly');
-      } catch (clickError) {
-        console.log('Direct click failed, trying alternative methods...');
-        try {
-          await targetFrame.evaluate(button => {
-            button.dispatchEvent(new MouseEvent('click', {
-              bubbles: true,
-              cancelable: true,
-              view: window
-            }));
-          }, continueButton);
-          console.log('Dispatched click event');
-        } catch (dispatchError) {
-          console.log('Dispatch failed, trying keyboard events...');
-          await targetFrame.focus('input[type="email"]');
-          await targetFrame.keyboard.press('Enter');
-          console.log('Pressed Enter key');
-        }
-      }
-    } else {
-      console.log('No continue button found, trying keyboard events...');
-      await targetFrame.focus('input[type="email"]');
-      await targetFrame.keyboard.press('Enter');
-      console.log('Pressed Enter key');
-    }
-    
-    // Wait for form submission
-    console.log('Waiting for form submission...');
     try {
-      await targetFrame.waitForFunction(() => {
-        return !document.querySelector('input[type="email"]') && 
-               !document.querySelector('input[type="password"]');
-      }, { timeout: 30000 });
-      console.log('Form submission successful');
-    } catch (error) {
-      console.log('Form might still be present, checking document state...');
-      const formStillPresent = await targetFrame.evaluate(() => {
-        return !!document.querySelector('input[type="email"]') || 
-               !!document.querySelector('input[type="password"]');
-      });
+      // Wait for and fill email input
+      await targetFrame.waitForSelector('input[type="email"]', { timeout: 10000 });
+      await targetFrame.type('input[type="email"]', docsendEmail);
+      console.log('Entered email in form');
       
-      if (formStillPresent) {
-        throw new Error('Form submission failed - form is still present');
-      }
-      console.log('Form appears to be gone, continuing...');
-    }
-    
-    // Wait for any cookie-related changes to take effect
-    await page.waitForTimeout(2000);
-    
-    // Wait for the document to load
-    await page.waitForSelector('.preso-view.page-view', { timeout: 10000 });
-
-    // Hide header and navigation elements
-    await page.evaluate(() => {
-      // Hide header elements
-      const headerSelectors = [
-        'header',
-        '.header',
-        '.top-bar',
-        '.header-bar-container',
-        '.presentation-toolbar',
-        '.toolbar-logo',
-        '.presentation-toolbar_buttons',
-        '.toolbar-page-indicator',
-        '.toolbar-button',
-        '.toolbar-rule',
-        '.positioned-context',
-        '.toolbar-popover',
-        '.left.carousel-control',
-        '.right.carousel-control',
-        '#prevPageButton',
-        '#nextPageButton',
-        '#prevPageIcon',
-        '#nextPageIcon'
-      ];
-      
-      // Hide bottom navigation elements
-      const bottomSelectors = [
-        '.navbar-fixed-bottom',
-        '.presentation-fixed-footer',
-        '.presentation-privacy-policy',
-        '.bottom-bar',
-        '.footer',
-        '.navigation',
-        '.page-controls',
-        '.controls'
-      ];
-
-      headerSelectors.forEach(selector => {
-        const elements = document.querySelectorAll(selector);
-        elements.forEach(el => {
-          if (el) el.style.display = 'none';
-        });
-      });
-
-      bottomSelectors.forEach(selector => {
-        const elements = document.querySelectorAll(selector);
-        elements.forEach(el => {
-          if (el) el.style.display = 'none';
-        });
-      });
-    });
-
-    // Click center of page to ensure focus
-    const viewport = await page.viewport();
-    const centerX = viewport.width / 2;
-    const centerY = viewport.height / 2;
-    await page.mouse.click(centerX, centerY);
-    console.log('Clicked center of page for focus');
-
-    // Hide header and navigation elements
-    await page.evaluate(() => {
-      // Hide header elements
-      const headerSelectors = [
-        'header',
-        '.header',
-        '.top-bar',
-        '.header-bar-container',
-        '.presentation-toolbar',
-        '.toolbar-logo',
-        '.presentation-toolbar_buttons',
-        '.toolbar-page-indicator',
-        '.toolbar-button',
-        '.toolbar-rule',
-        '.positioned-context',
-        '.toolbar-popover',
-        '.left.carousel-control',
-        '.right.carousel-control',
-        '#prevPageButton',
-        '#nextPageButton',
-        '#prevPageIcon',
-        '#nextPageIcon'
-      ];
-      
-      // Hide bottom navigation elements
-      const bottomSelectors = [
-        '.navbar-fixed-bottom',
-        '.presentation-fixed-footer',
-        '.presentation-privacy-policy',
-        '.bottom-bar',
-        '.footer',
-        '.navigation',
-        '.page-controls',
-        '.controls'
-      ];
-
-      headerSelectors.forEach(selector => {
-        const elements = document.querySelectorAll(selector);
-        elements.forEach(el => {
-          if (el) el.style.display = 'none';
-        });
-      });
-
-      bottomSelectors.forEach(selector => {
-        const elements = document.querySelectorAll(selector);
-        elements.forEach(el => {
-          if (el) el.style.display = 'none';
-        });
-      });
-    });
-
-    // Take screenshot of current page
-    const screenshot = await page.screenshot({
-      fullPage: true,
-      type: 'jpeg',
-      quality: 80,
-      encoding: 'binary'
-    });
-
-    // Get all image elements
-    const imageElements = await page.evaluate(() => {
-      const elements = document.querySelectorAll('img');
-      return Array.from(elements).map(el => el.src);
-    });
-    
-    // Capture screenshots of each page
-    console.log('Capturing document pages...');
-    const screenshots = [];
-    
-    // Document has multiple pages
-    let pageNumber = 1;
-    let hasNextPage = true;
-    let lastPageNumber = null;
-    
-    while (hasNextPage) {
-      console.log(`Capturing page ${pageNumber}...`);
-      
-      // Get current page number from the page number element
-      const currentPageNumber = await page.evaluate(() => {
-        const pageNumberElement = document.querySelector('span[aria-label="page number"]');
-        if (pageNumberElement) {
-          return parseInt(pageNumberElement.textContent, 10);
+      if (requiresPassword) {
+        console.log('Password required for this document. Waiting for password input...');
+        try {
+          // Wait for the password input
+          await targetFrame.waitForSelector('input[type="password"]', { timeout: 10000 });
+          console.log('Found password input field');
+          
+          // Enter the password
+          await targetFrame.type('input[type="password"]', docsendPassword);
+          console.log('Entered password in form');
+        } catch (error) {
+          console.log('Password input not found or an error occurred:', error);
+          throw new Error('Failed to enter password: ' + error.message);
         }
-        return null;
-      });
-      
-      if (currentPageNumber) {
-        console.log(`Current page number: ${currentPageNumber}`);
-        
-        // If we've seen this page number before, we've reached the end
-        if (lastPageNumber === currentPageNumber) {
-          console.log('Reached the end of the document (same page number detected)');
-          hasNextPage = false;
-          break;
-        }
-        
-        lastPageNumber = currentPageNumber;
       }
       
+      // Hide cookie banners and overlays
+      console.log('Hiding cookie banners and overlays...');
+      
+      // Wait for the page to stabilize and any dynamic content to load
+      console.log('Waiting for page to stabilize...');
+      await page.waitForTimeout(3000); // Increased initial wait time
+      
+      // First try to find and interact with the CCPA iframe
+      console.log('Looking for CCPA iframe...');
+      const ccpaIframeSelectors = [
+        '#ccpa-iframe',
+        '[data-testid="ccpa-iframe"]',
+        'iframe[src*="ccpa"]',
+        'iframe[src*="consent"]',
+        'iframe[src*="cookie"]'
+      ];
+      
+      let cookieBannerFound = false;
+      let retryCount = 0;
+      const maxRetries = 10; // Increased retries
+      
+      while (!cookieBannerFound && retryCount < maxRetries) {
+        // Wait for any dynamic content to load
+        await page.waitForTimeout(2000); // Increased wait time between retries
+        
+        // Try to find the CCPA iframe
+        for (const selector of ccpaIframeSelectors) {
+          try {
+            // Wait for the iframe to be present in the DOM
+            const iframeElement = await page.waitForSelector(selector, { timeout: 5000 });
+            if (iframeElement) {
+              console.log(`Found CCPA iframe with selector: ${selector}`);
+              
+              // Get the iframe's content frame
+              const frame = await iframeElement.contentFrame();
+              if (frame) {
+                console.log('Successfully accessed iframe content');
+                
+                // Wait for the accept button to be present in the iframe
+                try {
+                  const acceptButton = await frame.waitForSelector('#accept_all_cookies_button', { timeout: 5000 });
+                  if (acceptButton) {
+                    console.log('Found accept button in iframe');
+                    
+                    // Ensure button is visible and clickable
+                    const isVisible = await acceptButton.evaluate(el => {
+                      const style = window.getComputedStyle(el);
+                      return style.display !== 'none' && 
+                             style.visibility !== 'hidden' && 
+                             style.opacity !== '0' &&
+                             el.offsetWidth > 0 &&
+                             el.offsetHeight > 0;
+                    });
+                    
+                    if (isVisible) {
+                      // Try to click the button using different methods
+                      try {
+                        await acceptButton.click();
+                        console.log('Clicked accept button using click() method');
+                      } catch (clickError) {
+                        console.log('Click method failed, trying evaluate...');
+                        await acceptButton.evaluate(el => el.click());
+                        console.log('Clicked accept button using evaluate() method');
+                      }
+                      cookieBannerFound = true;
+                      break;
+                    }
+                  }
+                } catch (error) {
+                  console.log('Accept button not found in iframe yet:', error);
+                }
+              }
+            }
+          } catch (error) {
+            console.log(`Error with iframe selector ${selector}:`, error);
+          }
+        }
+        
+        if (!cookieBannerFound) {
+          retryCount++;
+          if (retryCount < maxRetries) {
+            console.log(`Retry ${retryCount}/${maxRetries} to find CCPA iframe...`);
+          }
+        }
+      }
+      
+      if (!cookieBannerFound) {
+        console.log('No CCPA iframe or accept button found after all attempts');
+      }
+      
+      // Wait for any cookie-related changes to take effect
+      await page.waitForTimeout(2000);
+      
+      // Try finding button by text using XPath first
+      console.log('Trying to find button by text using XPath...');
+      const buttonTexts = [
+        'Continue',
+        'Submit',
+        'View Document',
+        'Access Document',
+        'View',
+        'Access',
+        'Proceed',
+        'Next',
+        'Go'
+      ];
+      
+      let buttonFound = false;
+      for (const text of buttonTexts) {
+        try {
+          const [button] = await targetFrame.$x(`//button[contains(., '${text}')] | //input[@type='submit' and contains(@value, '${text}')]`);
+          if (button) {
+            console.log(`Found button with text: ${text}`);
+            
+            // Scroll button into view
+            await targetFrame.evaluate(el => {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, button);
+            
+            // Try multiple click methods
+            try {
+              await button.click();
+              console.log('Clicked button using click()');
+              buttonFound = true;
+              break;
+            } catch (e) {
+              console.log('Click() failed, trying dispatchEvent...');
+              await targetFrame.evaluate(el => {
+                el.dispatchEvent(new MouseEvent('click', {
+                  bubbles: true,
+                  cancelable: true,
+                  view: window
+                }));
+              }, button);
+              console.log('Clicked button using dispatchEvent');
+              buttonFound = true;
+              break;
+            }
+          }
+        } catch (error) {
+          console.log(`No button found with text: ${text}`);
+        }
+      }
+      
+      // If XPath search failed, try CSS selectors
+      if (!buttonFound) {
+        console.log('XPath search failed, trying CSS selectors...');
+        const buttonSelectors = [
+          'button[class*="continue"]',
+          'button[type="submit"]',
+          'input[type="submit"]',
+          'button[class*="submit"]',
+          'input[class*="submit"]',
+          'button[class*="button"]',
+          'input[class*="button"]',
+          'button[class*="btn"]',
+          'input[class*="btn"]',
+          'button[class*="primary"]',
+          'input[class*="primary"]',
+          'button[class*="action"]',
+          'input[class*="action"]',
+          // Add more specific DocSend selectors
+          'button[class*="docsend"]',
+          'button[class*="viewer"]',
+          'button[class*="document"]',
+          'button[class*="access"]',
+          'button[class*="proceed"]',
+          'button[class*="next"]',
+          'button[class*="go"]',
+          // Add data attributes
+          'button[data-testid*="submit"]',
+          'button[data-testid*="continue"]',
+          'button[data-testid*="view"]',
+          'button[data-testid*="access"]',
+          'button[data-testid*="proceed"]',
+          'button[data-testid*="next"]',
+          'button[data-testid*="go"]'
+        ];
+        
+        for (const selector of buttonSelectors) {
+          try {
+            console.log(`Checking for button with selector: ${selector}`);
+            
+            // Wait for button to be visible
+            await targetFrame.waitForSelector(selector, { 
+              visible: true,
+              timeout: 10000 
+            });
+            console.log(`Found visible button with selector: ${selector}`);
+            
+            // Wait for button to be enabled
+            await targetFrame.waitForFunction(
+              (sel) => {
+                const button = document.querySelector(sel);
+                return button && !button.disabled;
+              },
+              { timeout: 10000 },
+              selector
+            );
+            console.log(`Button is enabled: ${selector}`);
+            
+            // Scroll button into view and click
+            const clicked = await targetFrame.evaluate((sel) => {
+              const button = document.querySelector(sel);
+              if (button) {
+                // Scroll into view
+                button.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                
+                // Try multiple click methods
+                try {
+                  button.click();
+                  console.log('Clicked button using click()');
+                  return true;
+                } catch (e) {
+                  console.log('Click() failed, trying dispatchEvent...');
+                  button.dispatchEvent(new MouseEvent('click', {
+                    bubbles: true,
+                    cancelable: true,
+                    view: window
+                  }));
+                  console.log('Clicked button using dispatchEvent');
+                  return true;
+                }
+              }
+              return false;
+            }, selector);
+            
+            if (clicked) {
+              console.log(`Successfully clicked button with selector: ${selector}`);
+              buttonFound = true;
+              break;
+            }
+          } catch (error) {
+            console.log(`Button not found or not clickable with selector: ${selector}`, error);
+          }
+        }
+      }
+      
+      if (!buttonFound) {
+        throw new Error('Could not find or click any submit button');
+      }
+      
+      // Wait for navigation or content change
+      console.log('Waiting for page navigation or content change...');
+      try {
+        await page.waitForNavigation({ 
+          waitUntil: ['networkidle0', 'domcontentloaded'],
+          timeout: 60000 
+        });
+        console.log('Page navigation detected');
+      } catch (error) {
+        console.log('No navigation detected, waiting for content change...');
+        // If no navigation, wait for content to change
+        await page.waitForFunction(
+          () => {
+            const contentSelectors = [
+              'iframe[src*="docsend"]',
+              'div[class*="viewer"]',
+              'div[class*="document"]',
+              'div[class*="content"]'
+            ];
+            return contentSelectors.some(selector => document.querySelector(selector));
+          },
+          { timeout: 60000 }
+        );
+        console.log('Content change detected');
+      }
+      
+      // Wait a bit for any dynamic content to load
+      await page.waitForTimeout(5000);
+      
+      // Wait for the document to load
+      await page.waitForSelector('.preso-view.page-view', { timeout: 10000 });
+
+      // Hide header and navigation elements
+      await page.evaluate(() => {
+        // Hide header elements
+        const headerSelectors = [
+          'header',
+          '.header',
+          '.top-bar',
+          '.header-bar-container',
+          '.presentation-toolbar',
+          '.toolbar-logo',
+          '.presentation-toolbar_buttons',
+          '.toolbar-page-indicator',
+          '.toolbar-button',
+          '.toolbar-rule',
+          '.positioned-context',
+          '.toolbar-popover',
+          '.left.carousel-control',
+          '.right.carousel-control',
+          '#prevPageButton',
+          '#nextPageButton',
+          '#prevPageIcon',
+          '#nextPageIcon'
+        ];
+        
+        // Hide bottom navigation elements
+        const bottomSelectors = [
+          '.navbar-fixed-bottom',
+          '.presentation-fixed-footer',
+          '.presentation-privacy-policy',
+          '.bottom-bar',
+          '.footer',
+          '.navigation',
+          '.page-controls',
+          '.controls'
+        ];
+
+        headerSelectors.forEach(selector => {
+          const elements = document.querySelectorAll(selector);
+          elements.forEach(el => {
+            if (el) el.style.display = 'none';
+          });
+        });
+
+        bottomSelectors.forEach(selector => {
+          const elements = document.querySelectorAll(selector);
+          elements.forEach(el => {
+            if (el) el.style.display = 'none';
+          });
+        });
+      });
+
       // Click center of page to ensure focus
       const viewport = await page.viewport();
       const centerX = viewport.width / 2;
       const centerY = viewport.height / 2;
       await page.mouse.click(centerX, centerY);
       console.log('Clicked center of page for focus');
-      
+
       // Hide header and navigation elements
       await page.evaluate(() => {
         // Hide header elements
@@ -534,26 +644,27 @@ async function convertDocSendToPDF(url) {
         quality: 80,
         encoding: 'binary'
       });
+
+      // Get all image elements
+      const imageElements = await page.evaluate(() => {
+        const elements = document.querySelectorAll('img');
+        return Array.from(elements).map(el => el.src);
+      });
       
-      // Verify screenshot is valid
-      if (!screenshot || !Buffer.isBuffer(screenshot) || screenshot.length === 0) {
-        throw new Error(`Failed to capture screenshot for page ${pageNumber}`);
-      }
+      // Capture screenshots of each page
+      console.log('Capturing document pages...');
+      const screenshots = [];
       
-      console.log('Screenshot captured successfully, size:', screenshot.length, 'bytes');
-      screenshots.push(screenshot);
+      // Document has multiple pages
+      let pageNumber = 1;
+      let hasNextPage = true;
+      let lastPageNumber = null;
       
-      // Try to go to next page using arrow key
-      try {
-        console.log('Pressing ArrowRight key for next page...');
-        await page.keyboard.press('ArrowRight');
-        console.log('Successfully pressed ArrowRight key');
+      while (hasNextPage) {
+        console.log(`Capturing page ${pageNumber}...`);
         
-        // Wait for page transition
-        await page.waitForTimeout(2000);
-        
-        // Get new page number after navigation
-        const newPageNumber = await page.evaluate(() => {
+        // Get current page number from the page number element
+        const currentPageNumber = await page.evaluate(() => {
           const pageNumberElement = document.querySelector('span[aria-label="page number"]');
           if (pageNumberElement) {
             return parseInt(pageNumberElement.textContent, 10);
@@ -561,44 +672,153 @@ async function convertDocSendToPDF(url) {
           return null;
         });
         
-        if (newPageNumber) {
-          console.log(`New page number: ${newPageNumber}`);
-          if (newPageNumber === currentPageNumber) {
-            console.log('Page number unchanged, reached end of document');
+        if (currentPageNumber) {
+          console.log(`Current page number: ${currentPageNumber}`);
+          
+          // If we've seen this page number before, we've reached the end
+          if (lastPageNumber === currentPageNumber) {
+            console.log('Reached the end of the document (same page number detected)');
             hasNextPage = false;
-          } else {
-            pageNumber++;
+            break;
           }
-        } else {
-          // If we can't get the page number, fall back to screenshot comparison
-          const newScreenshot = await page.screenshot({
-            fullPage: true,
-            type: 'jpeg',
-            quality: 80,
-            encoding: 'binary'
+          
+          lastPageNumber = currentPageNumber;
+        }
+        
+        // Click center of page to ensure focus
+        const viewport = await page.viewport();
+        const centerX = viewport.width / 2;
+        const centerY = viewport.height / 2;
+        await page.mouse.click(centerX, centerY);
+        console.log('Clicked center of page for focus');
+        
+        // Hide header and navigation elements
+        await page.evaluate(() => {
+          // Hide header elements
+          const headerSelectors = [
+            'header',
+            '.header',
+            '.top-bar',
+            '.header-bar-container',
+            '.presentation-toolbar',
+            '.toolbar-logo',
+            '.presentation-toolbar_buttons',
+            '.toolbar-page-indicator',
+            '.toolbar-button',
+            '.toolbar-rule',
+            '.positioned-context',
+            '.toolbar-popover',
+            '.left.carousel-control',
+            '.right.carousel-control',
+            '#prevPageButton',
+            '#nextPageButton',
+            '#prevPageIcon',
+            '#nextPageIcon'
+          ];
+          
+          // Hide bottom navigation elements
+          const bottomSelectors = [
+            '.navbar-fixed-bottom',
+            '.presentation-fixed-footer',
+            '.presentation-privacy-policy',
+            '.bottom-bar',
+            '.footer',
+            '.navigation',
+            '.page-controls',
+            '.controls'
+          ];
+
+          headerSelectors.forEach(selector => {
+            const elements = document.querySelectorAll(selector);
+            elements.forEach(el => {
+              if (el) el.style.display = 'none';
+            });
+          });
+
+          bottomSelectors.forEach(selector => {
+            const elements = document.querySelectorAll(selector);
+            elements.forEach(el => {
+              if (el) el.style.display = 'none';
+            });
+          });
+        });
+
+        // Take screenshot of current page
+        const screenshot = await page.screenshot({
+          fullPage: true,
+          type: 'jpeg',
+          quality: 80,
+          encoding: 'binary'
+        });
+        
+        // Verify screenshot is valid
+        if (!screenshot || !Buffer.isBuffer(screenshot) || screenshot.length === 0) {
+          throw new Error(`Failed to capture screenshot for page ${pageNumber}`);
+        }
+        
+        console.log('Screenshot captured successfully, size:', screenshot.length, 'bytes');
+        screenshots.push(screenshot);
+        
+        // Try to go to next page using arrow key
+        try {
+          console.log('Pressing ArrowRight key for next page...');
+          await page.keyboard.press('ArrowRight');
+          console.log('Successfully pressed ArrowRight key');
+          
+          // Wait for page transition
+          await page.waitForTimeout(2000);
+          
+          // Get new page number after navigation
+          const newPageNumber = await page.evaluate(() => {
+            const pageNumberElement = document.querySelector('span[aria-label="page number"]');
+            if (pageNumberElement) {
+              return parseInt(pageNumberElement.textContent, 10);
+            }
+            return null;
           });
           
-          if (Buffer.compare(screenshot, newScreenshot) === 0) {
-            console.log('Screenshots match, no page change detected');
-            hasNextPage = false;
+          if (newPageNumber) {
+            console.log(`New page number: ${newPageNumber}`);
+            if (newPageNumber === currentPageNumber) {
+              console.log('Page number unchanged, reached end of document');
+              hasNextPage = false;
+            } else {
+              pageNumber++;
+            }
           } else {
-            console.log('New page detected');
-            pageNumber++;
+            // If we can't get the page number, fall back to screenshot comparison
+            const newScreenshot = await page.screenshot({
+              fullPage: true,
+              type: 'jpeg',
+              quality: 80,
+              encoding: 'binary'
+            });
+            
+            if (Buffer.compare(screenshot, newScreenshot) === 0) {
+              console.log('Screenshots match, no page change detected');
+              hasNextPage = false;
+            } else {
+              console.log('New page detected');
+              pageNumber++;
+            }
           }
+        } catch (error) {
+          console.log('Error navigating to next page:', error);
+          hasNextPage = false;
         }
-      } catch (error) {
-        console.log('Error navigating to next page:', error);
-        hasNextPage = false;
       }
+      
+      console.log(`Captured ${screenshots.length} pages successfully`);
+      return screenshots;
+    } catch (error) {
+      console.error('Error processing DocSend:', error);
+      throw error;
+    } finally {
+      await browser.close();
     }
-    
-    console.log(`Captured ${screenshots.length} pages successfully`);
-    return screenshots;
   } catch (error) {
     console.error('Error capturing document:', error);
     throw error;
-  } finally {
-    await browser.close();
   }
 }
 
