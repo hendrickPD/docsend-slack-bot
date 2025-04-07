@@ -356,10 +356,6 @@ async function convertDocSendToPDF(url) {
       if (requiresPassword && url.includes('pmfv4ph82dsfjeg6')) {
         console.log('Password required for specific document. Using original workflow for password entry...');
         
-        // Take a screenshot of the current state
-        await page.screenshot({ path: 'before-password.png', fullPage: true });
-        console.log('Took screenshot of page state before password entry');
-        
         // Try to find the password field using multiple selectors
         console.log('Trying to find password field with multiple selectors...');
         const passwordSelectors = [
@@ -430,8 +426,7 @@ async function convertDocSendToPDF(url) {
         }
         
         if (!passwordInput) {
-          console.log('Could not find password input with any selector, taking final screenshot');
-          await page.screenshot({ path: 'no-password-found.png', fullPage: true });
+          console.log('Could not find password input with any selector');
           throw new Error('Could not find password input field with any selector');
         }
         
