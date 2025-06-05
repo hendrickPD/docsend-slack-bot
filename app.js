@@ -252,7 +252,181 @@ async function convertDocSendToPDF(url, messageText) {
     }, { timeout: 30000 });
     console.log('Document fully loaded');
     
-    // Hide cookie banners and overlays (comprehensive approach from working version)
+    // Restore generic email and passcode handling
+    const passwordMatch = messageText.match(/pw:([^\s]+)/i);
+    const docsendPassword = passwordMatch ? passwordMatch[1] : null;
+
+    // Handle email entry in login iframe or inline form
+    const loginFrameHandle = await page.$('iframe[src*="docsend"][src*="login"]');
+    if (loginFrameHandle) {
+      const loginFrame = await loginFrameHandle.contentFrame();
+      console.log('Email login iframe detected; entering DOCSEND_EMAIL');
+      await loginFrame.waitForSelector('input[type="email"]', { timeout: 60000 });
+      await loginFrame.type('input[type="email"]', process.env.DOCSEND_EMAIL);
+      console.log('Entered email in form');
+      
+      // Handle cookie banner and overlays (simple approach first)
+      try {
+        await page.evaluate(() => {
+          const cookieBanner = document.querySelector('#onetrust-consent-sdk');
+          if (cookieBanner) cookieBanner.remove();
+        });
+        console.log('Removed cookie banner if present');
+      } catch (error) {
+        console.log('No cookie banner to remove or error removing it:', error);
+      }
+      
+      // Try to find and click continue button using various methods
+      try {
+        // Try XPath method
+        console.log('Trying XPath method to find continue button...');
+        try {
+          const [continueBtn] = await loginFrame.$x("//button[contains(normalize-space(.), 'Continue')]");
+          if (continueBtn) {
+            await continueBtn.click();
+            await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 });
+            console.log('Email submitted via iframe (XPath method)');
+          } else {
+            console.log('XPath method failed to find button');
+            
+            // Try alternative selectors
+            console.log('Trying alternative button selectors...');
+            const alternativeSelectors = [
+              "button[type='submit']",
+              "button.submit-button",
+              "button.continue-button",
+              "button.btn-primary",
+              "button.primary-button",
+              "button:not([disabled])"
+            ];
+            
+            for (const selector of alternativeSelectors) {
+              try {
+                console.log(`Trying selector: ${selector}`);
+                const button = await loginFrame.$(selector);
+                if (button) {
+                  await button.click();
+                  await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 10000 }).catch(() => {});
+                  console.log(`Email submitted via iframe using selector: ${selector}`);
+                  break;
+                }
+              } catch (err) {
+                console.log(`Error with selector ${selector}:`, err.message);
+              }
+            }
+            
+            // As a last resort, try pressing Enter in the email field
+            try {
+              console.log('Trying to press Enter in email field...');
+              await loginFrame.focus('input[type="email"]');
+              await loginFrame.keyboard.press('Enter');
+              await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 10000 }).catch(() => {});
+              console.log('Pressed Enter in email field');
+            } catch (enterErr) {
+              console.log('Error pressing Enter:', enterErr.message);
+            }
+          }
+        } catch (xpathError) {
+          console.log('XPath method failed:', xpathError);
+        }
+        
+        // Wait for navigation regardless of button click success
+        await page.waitForTimeout(5000);
+      } catch (e) {
+        console.log('Failed to click continue button, but proceeding anyway:', e.message);
+      }
+    } else if (await page.$('input[type="email"], input[name="email"]') !== null) {
+      console.log('Email login detected; entering DOCSEND_EMAIL');
+      await page.waitForSelector('input[type="email"], input[name="email"]', { timeout: 60000 });
+      await page.type('input[type="email"], input[name="email"]', process.env.DOCSEND_EMAIL);
+      console.log('Entered email in form');
+      
+      // Handle cookie banner and overlays (simple approach first)
+      try {
+        await page.evaluate(() => {
+          const cookieBanner = document.querySelector('#onetrust-consent-sdk');
+          if (cookieBanner) cookieBanner.remove();
+        });
+        console.log('Removed cookie banner if present');
+      } catch (error) {
+        console.log('No cookie banner to remove or error removing it:', error);
+      }
+      
+      // Try to find and click continue button using various methods
+      try {
+        // Try XPath method
+        console.log('Trying XPath method to find continue button...');
+        try {
+          const [continueBtn] = await page.$x("//button[contains(normalize-space(.), 'Continue')]");
+          if (continueBtn) {
+            await continueBtn.click();
+            await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 });
+            console.log('Email submitted inline (XPath method)');
+          } else {
+            console.log('XPath method failed to find button');
+          }
+        } catch (xpathError) {
+          console.log('XPath method failed:', xpathError);
+        }
+        
+        // Wait for navigation regardless of button click success
+        await page.waitForTimeout(5000);
+      } catch (e) {
+        console.log('Failed to click continue button, but proceeding anyway:', e.message);
+      }
+    }
+
+    // Handle DocSend passcode entry using robust search across page and iframes
+    if (docsendPassword) {
+      console.log('Password required; using generic password entry workflow...');
+      const passInputSelector = 'input[type="password"], input[name="passcode"], input[name="password"], input[placeholder*="Pass"], input[aria-label*="pass"]';
+      let inputFrame = page;
+      let passInputHandle = await page.$(passInputSelector);
+      // If not found in main page, search in all frames
+      if (!passInputHandle) {
+        for (const frame of page.frames()) {
+          try {
+            passInputHandle = await frame.waitForSelector(passInputSelector, { timeout: 5000 });
+            if (passInputHandle) {
+              inputFrame = frame;
+              break;
+            }
+          } catch (e) {}
+        }
+      }
+      if (!passInputHandle) {
+        throw new Error('Passcode input field not found');
+      }
+      await inputFrame.type(passInputSelector, docsendPassword);
+      console.log('Passcode typed into field');
+      // Click Continue button via XPath in page or frames
+      const continueXPath = "//button[contains(normalize-space(.), 'Continue')]";
+      let clicked = false;
+      // Try main page
+      const [btnMain] = await page.$x(continueXPath);
+      if (btnMain) {
+        await btnMain.click();
+        clicked = true;
+      } else {
+        // Try frames
+        for (const frame of page.frames()) {
+          const [btnFrame] = await frame.$x(continueXPath);
+          if (btnFrame) {
+            await btnFrame.click();
+            clicked = true;
+            break;
+          }
+        }
+      }
+      if (!clicked) {
+        console.log('Continue button not found after passcode entry');
+      } else {
+        await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 });
+        console.log('Passcode submitted');
+      }
+    }
+    
+    // Hide cookie banners and overlays (comprehensive CCPA iframe handling)
     console.log('Hiding cookie banners and overlays...');
     
     // Wait for the page to stabilize and any dynamic content to load
@@ -345,158 +519,6 @@ async function convertDocSendToPDF(url, messageText) {
     // Wait for any cookie-related changes to take effect
     await page.waitForTimeout(2000);
     
-    // Also remove any OneTrust elements as fallback
-    await dismissCookieBanner(page);
-    
-    // Restore generic email and passcode handling
-    const passwordMatch = messageText.match(/pw:([^\s]+)/i);
-    const docsendPassword = passwordMatch ? passwordMatch[1] : null;
-
-    // Handle email entry in login iframe or inline form
-    const loginFrameHandle = await page.$('iframe[src*="docsend"][src*="login"]');
-    if (loginFrameHandle) {
-      const loginFrame = await loginFrameHandle.contentFrame();
-      console.log('Email login iframe detected; entering DOCSEND_EMAIL');
-      await loginFrame.waitForSelector('input[type="email"]', { timeout: 60000 });
-      await loginFrame.type('input[type="email"]', process.env.DOCSEND_EMAIL);
-      
-      // Try to find and click continue button using various methods
-      try {
-        // Try XPath method
-        console.log('Trying XPath method to find continue button...');
-        try {
-          const [continueBtn] = await loginFrame.$x("//button[contains(normalize-space(.), 'Continue')]");
-          if (continueBtn) {
-            await continueBtn.click();
-            await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 });
-            console.log('Email submitted via iframe (XPath method)');
-          } else {
-            console.log('XPath method failed to find button');
-            
-            // Try alternative selectors
-            console.log('Trying alternative button selectors...');
-            const alternativeSelectors = [
-              "button[type='submit']",
-              "button.submit-button",
-              "button.continue-button",
-              "button.btn-primary",
-              "button.primary-button",
-              "button:not([disabled])"
-            ];
-            
-            for (const selector of alternativeSelectors) {
-              try {
-                console.log(`Trying selector: ${selector}`);
-                const button = await loginFrame.$(selector);
-                if (button) {
-                  await button.click();
-                  await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 10000 }).catch(() => {});
-                  console.log(`Email submitted via iframe using selector: ${selector}`);
-                  break;
-                }
-              } catch (err) {
-                console.log(`Error with selector ${selector}:`, err.message);
-              }
-            }
-            
-            // As a last resort, try pressing Enter in the email field
-            try {
-              console.log('Trying to press Enter in email field...');
-              await loginFrame.focus('input[type="email"]');
-              await loginFrame.keyboard.press('Enter');
-              await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 10000 }).catch(() => {});
-              console.log('Pressed Enter in email field');
-            } catch (enterErr) {
-              console.log('Error pressing Enter:', enterErr.message);
-            }
-          }
-        } catch (xpathError) {
-          console.log('XPath method failed:', xpathError);
-        }
-        
-        // Wait for navigation regardless of button click success
-        await page.waitForTimeout(5000);
-      } catch (e) {
-        console.log('Failed to click continue button, but proceeding anyway:', e.message);
-      }
-    } else if (await page.$('input[type="email"], input[name="email"]') !== null) {
-      console.log('Email login detected; entering DOCSEND_EMAIL');
-      await page.waitForSelector('input[type="email"], input[name="email"]', { timeout: 60000 });
-      await page.type('input[type="email"], input[name="email"]', process.env.DOCSEND_EMAIL);
-      
-      // Try to find and click continue button using various methods
-      try {
-        // Try XPath method
-        console.log('Trying XPath method to find continue button...');
-        try {
-          const [continueBtn] = await page.$x("//button[contains(normalize-space(.), 'Continue')]");
-          if (continueBtn) {
-            await continueBtn.click();
-            await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 });
-            console.log('Email submitted inline (XPath method)');
-          } else {
-            console.log('XPath method failed to find button');
-          }
-        } catch (xpathError) {
-          console.log('XPath method failed:', xpathError);
-        }
-        
-        // Wait for navigation regardless of button click success
-        await page.waitForTimeout(5000);
-      } catch (e) {
-        console.log('Failed to click continue button, but proceeding anyway:', e.message);
-      }
-    }
-
-    // Handle DocSend passcode entry using robust search across page and iframes
-    if (docsendPassword) {
-      console.log('Password required; using generic password entry workflow...');
-      const passInputSelector = 'input[type="password"], input[name="passcode"], input[name="password"], input[placeholder*="Pass"], input[aria-label*="pass"]';
-      let inputFrame = page;
-      let passInputHandle = await page.$(passInputSelector);
-      // If not found in main page, search in all frames
-      if (!passInputHandle) {
-        for (const frame of page.frames()) {
-          try {
-            passInputHandle = await frame.waitForSelector(passInputSelector, { timeout: 5000 });
-            if (passInputHandle) {
-              inputFrame = frame;
-              break;
-            }
-          } catch (e) {}
-        }
-      }
-      if (!passInputHandle) {
-        throw new Error('Passcode input field not found');
-      }
-      await inputFrame.type(passInputSelector, docsendPassword);
-      console.log('Passcode typed into field');
-      // Click Continue button via XPath in page or frames
-      const continueXPath = "//button[contains(normalize-space(.), 'Continue')]";
-      let clicked = false;
-      // Try main page
-      const [btnMain] = await page.$x(continueXPath);
-      if (btnMain) {
-        await btnMain.click();
-        clicked = true;
-      } else {
-        // Try frames
-        for (const frame of page.frames()) {
-          const [btnFrame] = await frame.$x(continueXPath);
-          if (btnFrame) {
-            await btnFrame.click();
-            clicked = true;
-            break;
-          }
-        }
-      }
-      if (!clicked) {
-        console.log('Continue button not found after passcode entry');
-      } else {
-        await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 });
-        console.log('Passcode submitted');
-      }
-    }
     console.log('Proceeding to capture document pages');
     try {
       const screenshots = await capturePages(page);
