@@ -108,6 +108,116 @@ const verifySlackRequest = (req) => {
   );
 };
 
+// Function to dismiss cookie banners comprehensively
+async function dismissCookieBanner(page) {
+  console.log('Attempting to dismiss cookie banners...');
+  
+  try {
+    // First, try to find and click OneTrust accept buttons in iframes
+    const iframes = page.frames();
+    for (const frame of iframes) {
+      try {
+        const frameUrl = frame.url();
+        if (frameUrl.includes('onetrust') || frameUrl.includes('cookie')) {
+          console.log('Found OneTrust iframe, attempting to click accept button...');
+          
+          // Try multiple selectors for the accept button
+          const acceptSelectors = [
+            '#onetrust-accept-btn-handler',
+            '#accept-recommended-btn-handler',
+            '.accept-cookies-btn',
+            '.onetrust-close-btn-handler',
+            '[id*="accept"]',
+            '[class*="accept"]',
+            'button[aria-label*="Accept"]',
+            'button[title*="Accept"]'
+          ];
+          
+          for (const selector of acceptSelectors) {
+            try {
+              const button = await frame.$(selector);
+              if (button) {
+                await button.click();
+                console.log(`Successfully clicked accept button with selector: ${selector}`);
+                await page.waitForTimeout(1000);
+                break;
+              }
+            } catch (e) {
+              // Continue to next selector
+            }
+          }
+        }
+      } catch (e) {
+        // Continue to next frame
+      }
+    }
+    
+    // Try to find and click accept buttons in the main page
+    const mainPageSelectors = [
+      '#onetrust-accept-btn-handler',
+      '#accept-recommended-btn-handler',
+      '.accept-cookies-btn',
+      '.onetrust-close-btn-handler',
+      '[id*="accept"]',
+      '[class*="accept"]',
+      'button[aria-label*="Accept"]',
+      'button[title*="Accept"]',
+      'a[href*="accept"]'
+    ];
+    
+    for (const selector of mainPageSelectors) {
+      try {
+        const button = await page.$(selector);
+        if (button) {
+          await button.click();
+          console.log(`Successfully clicked accept button with selector: ${selector}`);
+          await page.waitForTimeout(1000);
+          break;
+        }
+      } catch (e) {
+        // Continue to next selector
+      }
+    }
+    
+    // Wait a bit for any animations to complete
+    await page.waitForTimeout(2000);
+    
+  } catch (e) {
+    console.log('Error during cookie banner dismissal:', e.message);
+  }
+  
+  // Finally, force remove any remaining cookie banner elements
+  await page.evaluate(() => {
+    const selectors = [
+      '.onetrust-banner-ui',
+      '.onetrust-pc-dark-filter', 
+      '#onetrust-banner-sdk',
+      '.onetrust-consent-sdk',
+      '.cookie-banner',
+      '.cookie-consent',
+      '.cookies-banner',
+      '[class*="cookie"]',
+      '[id*="cookie"]',
+      '[class*="consent"]',
+      '[id*="consent"]'
+    ];
+    
+    selectors.forEach(sel => {
+      document.querySelectorAll(sel).forEach(el => {
+        el.style.display = 'none';
+        el.style.visibility = 'hidden';
+        el.style.opacity = '0';
+        el.style.zIndex = '-9999';
+        el.remove();
+      });
+    });
+    
+    console.log('Force removed remaining cookie banner elements');
+  });
+  
+  console.log('Cookie banner dismissal completed');
+}
+
 // Function to convert DocSend to PDF
 /**
  * Captures all pages of the DocSend document by hiding UI elements,
@@ -131,11 +241,8 @@ async function capturePages(page) {
   console.log('UI hidden; focusing page');
   const { width, height } = page.viewport();
   await page.mouse.click(width / 2, height / 2);
-  // also hide any leftover cookie banners
-  await page.evaluate(() => {
-    const el = document.querySelector('.onetrust-banner-ui, .onetrust-pc-dark-filter, #onetrust-banner-sdk');
-    if (el) el.style.display = 'none';
-  });
+  // also dismiss any leftover cookie banners
+  await dismissCookieBanner(page);
   // Allow late-loading UI (cookie banners, etc.) to appear
   await page.waitForFunction(
     () => !document.querySelector('.loading-spinner') && !document.querySelector('.loading'),
@@ -147,6 +254,10 @@ async function capturePages(page) {
   let pageNum = 1;
   while (true) {
     console.log(`Taking screenshot of page ${pageNum}`);
+    
+    // Dismiss any cookie banners that might have reappeared
+    await dismissCookieBanner(page);
+    
     const shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 80 });
     screenshots.push(shot);
     const current = await page.evaluate(() => {
@@ -237,20 +348,7 @@ async function convertDocSendToPDF(url, messageText) {
     }, { timeout: 30000 });
     console.log('Document fully loaded');
     // Dismiss any OneTrust cookie banner (iframe or inline)
-    try {
-      // Try iframe-based consent
-      const frameHandle = await page.waitForSelector('iframe[src*="onetrust"]', { timeout: 5000 });
-      const frame = await frameHandle.contentFrame();
-      await frame.click('#onetrust-accept-btn-handler');
-      await page.waitForTimeout(1000);
-    } catch (e) {
-      // Fallback to inline banner removal
-      await page.evaluate(() => {
-        document.querySelectorAll(
-          '.onetrust-banner-ui, .onetrust-pc-dark-filter, #onetrust-banner-sdk'
-        ).forEach(el => el.remove());
-      });
-    }
+    await dismissCookieBanner(page);
     
     // Restore generic email and passcode handling
     const passwordMatch = messageText.match(/pw:([^\s]+)/i);
@@ -415,13 +513,15 @@ async function convertDocSendToPDF(url, messageText) {
         await page.evaluate(() => {
           const selectors = [
             'header', '.header', '.top-bar', '.presentation-toolbar',
-            '.navbar-fixed-bottom', '.bottom-bar', '.presentation-fixed-footer',
-            '.onetrust-banner-ui', '.onetrust-pc-dark-filter', '#onetrust-banner-sdk'
+            '.navbar-fixed-bottom', '.bottom-bar', '.presentation-fixed-footer'
           ];
           selectors.forEach(sel =>
             document.querySelectorAll(sel).forEach(el => el.style.display = 'none')
           );
         });
+        
+        // Dismiss any cookie banners
+        await dismissCookieBanner(page);
         
         // Take a screenshot of whatever is currently visible
         console.log('Taking fallback screenshot');
