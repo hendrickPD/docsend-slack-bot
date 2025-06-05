@@ -251,7 +251,101 @@ async function convertDocSendToPDF(url, messageText) {
              !document.querySelector('.loading');
     }, { timeout: 30000 });
     console.log('Document fully loaded');
-    // Dismiss any OneTrust cookie banner (iframe or inline)
+    
+    // Hide cookie banners and overlays (comprehensive approach from working version)
+    console.log('Hiding cookie banners and overlays...');
+    
+    // Wait for the page to stabilize and any dynamic content to load
+    console.log('Waiting for page to stabilize...');
+    await page.waitForTimeout(3000);
+    
+    // First try to find and interact with the CCPA iframe
+    console.log('Looking for CCPA iframe...');
+    const ccpaIframeSelectors = [
+      '#ccpa-iframe',
+      '[data-testid="ccpa-iframe"]',
+      'iframe[src*="ccpa"]',
+      'iframe[src*="consent"]',
+      'iframe[src*="cookie"]'
+    ];
+    
+    let cookieBannerFound = false;
+    let retryCount = 0;
+    const maxRetries = 10;
+    
+    while (!cookieBannerFound && retryCount < maxRetries) {
+      // Wait for any dynamic content to load
+      await page.waitForTimeout(2000);
+      
+      // Try to find the CCPA iframe
+      for (const selector of ccpaIframeSelectors) {
+        try {
+          // Wait for the iframe to be present in the DOM
+          const iframeElement = await page.waitForSelector(selector, { timeout: 5000 });
+          if (iframeElement) {
+            console.log(`Found CCPA iframe with selector: ${selector}`);
+            
+            // Get the iframe's content frame
+            const frame = await iframeElement.contentFrame();
+            if (frame) {
+              console.log('Successfully accessed iframe content');
+              
+              // Wait for the accept button to be present in the iframe
+              try {
+                const acceptButton = await frame.waitForSelector('#accept_all_cookies_button', { timeout: 5000 });
+                if (acceptButton) {
+                  console.log('Found accept button in iframe');
+                  
+                  // Ensure button is visible and clickable
+                  const isVisible = await acceptButton.evaluate(el => {
+                    const style = window.getComputedStyle(el);
+                    return style.display !== 'none' && 
+                           style.visibility !== 'hidden' && 
+                           style.opacity !== '0' &&
+                           el.offsetWidth > 0 &&
+                           el.offsetHeight > 0;
+                  });
+                  
+                  if (isVisible) {
+                    // Try to click the button using different methods
+                    try {
+                      await acceptButton.click();
+                      console.log('Clicked accept button using click() method');
+                    } catch (clickError) {
+                      console.log('Click method failed, trying evaluate...');
+                      await acceptButton.evaluate(el => el.click());
+                      console.log('Clicked accept button using evaluate() method');
+                    }
+                    cookieBannerFound = true;
+                    break;
+                  }
+                }
+              } catch (error) {
+                console.log('Accept button not found in iframe yet:', error);
+              }
+            }
+          }
+        } catch (error) {
+          console.log(`Error with iframe selector ${selector}:`, error);
+        }
+      }
+      
+      if (!cookieBannerFound) {
+        retryCount++;
+        if (retryCount < maxRetries) {
+          console.log(`Retry ${retryCount}/${maxRetries} to find CCPA iframe...`);
+        }
+      }
+    }
+    
+    if (!cookieBannerFound) {
+      console.log('No CCPA iframe or accept button found after all attempts');
+    }
+    
+    // Wait for any cookie-related changes to take effect
+    await page.waitForTimeout(2000);
+    
+    // Also remove any OneTrust elements as fallback
     await dismissCookieBanner(page);
     
     // Restore generic email and passcode handling
