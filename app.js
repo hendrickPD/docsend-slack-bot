@@ -561,13 +561,15 @@ expressApp.post('/slack/events', (req, res) => {
       if (messageText && messageText.includes('docsend.com')) {
         console.log('Found DocSend link:', messageText);
         
-        // Extract DocSend URL
-        const docsendUrl = messageText.match(/https:\/\/docsend\.com\/view\/[a-zA-Z0-9]+/)?.[0];
+        // Extract DocSend URL (handle both /view/ and /v/ formats, with or without angle brackets)
+        const docsendUrl = messageText.match(/<?(https:\/\/docsend\.com\/(?:view\/|v\/)[a-zA-Z0-9]+(?:\/[a-zA-Z0-9\-]+)?)>?/)?.[1];
         if (docsendUrl) {
           console.log('Extracted DocSend URL:', docsendUrl);
           
-          // Extract document ID from URL
-          const docId = docsendUrl.split('/').pop();
+          // Extract document ID from URL (handle both /view/ and /v/ formats)
+          const docId = docsendUrl.includes('/view/') 
+            ? docsendUrl.split('/view/')[1].split('/')[0]
+            : docsendUrl.split('/v/')[1].split('/')[0];
           console.log('Extracted document ID:', docId);
           
           // Create a unique key for this message
