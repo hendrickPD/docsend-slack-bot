@@ -255,6 +255,7 @@ async function convertDocSendToPDF(url, messageText) {
     // Restore generic email and passcode handling
     const passwordMatch = messageText.match(/pw:([^\s]+)/i);
     const docsendPassword = passwordMatch ? passwordMatch[1] : null;
+    let passwordAlreadyHandled = false;
 
     // Handle email entry in login iframe or inline form
     const loginFrameHandle = await page.$('iframe[src*="docsend"][src*="login"]');
@@ -264,6 +265,26 @@ async function convertDocSendToPDF(url, messageText) {
       await loginFrame.waitForSelector('input[type="email"]', { timeout: 60000 });
       await loginFrame.type('input[type="email"]', process.env.DOCSEND_EMAIL);
       console.log('Entered email in form');
+      
+      // Check if password field is also present in the iframe
+      if (docsendPassword) {
+        console.log('Password required and email/password iframe detected; entering password...');
+        
+        // Simple password field selector since it's in the same iframe as email
+        const passwordSelector = 'input[type="password"]';
+        
+        try {
+          const passwordField = await loginFrame.waitForSelector(passwordSelector, { timeout: 5000 });
+          if (passwordField) {
+            await loginFrame.type(passwordSelector, docsendPassword);
+            console.log('Entered password in iframe');
+          } else {
+            console.log('Password field not found in email iframe');
+          }
+        } catch (e) {
+          console.log('Error entering password in email iframe:', e.message);
+        }
+      }
       
       // Handle cookie banner and overlays (simple approach first)
       try {
@@ -285,7 +306,7 @@ async function convertDocSendToPDF(url, messageText) {
           if (continueBtn) {
             await continueBtn.click();
             await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 });
-            console.log('Email submitted via iframe (XPath method)');
+            console.log('Email and password submitted via iframe (XPath method)');
           } else {
             console.log('XPath method failed to find button');
             
@@ -341,6 +362,26 @@ async function convertDocSendToPDF(url, messageText) {
       await page.type('input[type="email"], input[name="email"]', process.env.DOCSEND_EMAIL);
       console.log('Entered email in form');
       
+      // Check if password field is also present on the same form
+      if (docsendPassword) {
+        console.log('Password required and email/password form detected; entering password...');
+        
+        // Simple password field selector since it's on the same form as email
+        const passwordSelector = 'input[type="password"]';
+        
+        try {
+          const passwordField = await page.waitForSelector(passwordSelector, { timeout: 5000 });
+          if (passwordField) {
+            await page.type(passwordSelector, docsendPassword);
+            console.log('Entered password in form');
+          } else {
+            console.log('Password field not found on email form');
+          }
+        } catch (e) {
+          console.log('Error entering password on email form:', e.message);
+        }
+      }
+      
       // Handle cookie banner and overlays (simple approach first)
       try {
         await page.evaluate(() => {
@@ -361,7 +402,7 @@ async function convertDocSendToPDF(url, messageText) {
           if (continueBtn) {
             await continueBtn.click();
             await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 });
-            console.log('Email submitted inline (XPath method)');
+            console.log('Email and password submitted inline (XPath method)');
           } else {
             console.log('XPath method failed to find button');
           }
@@ -379,25 +420,119 @@ async function convertDocSendToPDF(url, messageText) {
     // Handle DocSend passcode entry using robust search across page and iframes
     if (docsendPassword) {
       console.log('Password required; using generic password entry workflow...');
-      const passInputSelector = 'input[type="password"], input[name="passcode"], input[name="password"], input[placeholder*="Pass"], input[aria-label*="pass"]';
+      
+      // More comprehensive selectors for password fields
+      const passInputSelectors = [
+        'input[type="password"]',
+        'input[name="passcode"]', 
+        'input[name="password"]',
+        'input[name="passCode"]',
+        'input[name="pass"]',
+        'input[placeholder*="Pass"]',
+        'input[placeholder*="pass"]',
+        'input[placeholder*="Password"]',
+        'input[placeholder*="password"]',
+        'input[aria-label*="pass"]',
+        'input[aria-label*="Pass"]',
+        'input[id*="pass"]',
+        'input[id*="Pass"]',
+        'input[class*="pass"]',
+        'input[class*="Pass"]',
+        'input[data-testid*="pass"]',
+        'input[data-testid*="Pass"]'
+      ];
+      
       let inputFrame = page;
-      let passInputHandle = await page.$(passInputSelector);
-      // If not found in main page, search in all frames
-      if (!passInputHandle) {
-        for (const frame of page.frames()) {
-          try {
-            passInputHandle = await frame.waitForSelector(passInputSelector, { timeout: 5000 });
-            if (passInputHandle) {
-              inputFrame = frame;
-              break;
-            }
-          } catch (e) {}
+      let passInputHandle = null;
+      let foundSelector = null;
+      
+      // Wait a bit longer for dynamic content to load
+      await page.waitForTimeout(3000);
+      
+      // Try each selector in the main page first
+      for (const selector of passInputSelectors) {
+        try {
+          passInputHandle = await page.waitForSelector(selector, { timeout: 2000 });
+          if (passInputHandle) {
+            foundSelector = selector;
+            console.log(`Found password field in main page with selector: ${selector}`);
+            break;
+          }
+        } catch (e) {
+          // Continue to next selector
         }
       }
+      
+      // If not found in main page, search in all frames
       if (!passInputHandle) {
-        throw new Error('Passcode input field not found');
+        console.log('Password field not found in main page, searching frames...');
+        for (const frame of page.frames()) {
+          if (passInputHandle) break;
+          for (const selector of passInputSelectors) {
+            try {
+              passInputHandle = await frame.waitForSelector(selector, { timeout: 2000 });
+              if (passInputHandle) {
+                inputFrame = frame;
+                foundSelector = selector;
+                console.log(`Found password field in frame with selector: ${selector}`);
+                break;
+              }
+            } catch (e) {
+              // Continue to next selector/frame
+            }
+          }
+        }
       }
-      await inputFrame.type(passInputSelector, docsendPassword);
+      
+      // If still not found, try a more generic approach
+      if (!passInputHandle) {
+        console.log('Trying generic input field search...');
+        try {
+          // Look for any input field that might be for password
+          const allInputs = await page.$$('input');
+          for (const input of allInputs) {
+            const inputType = await input.evaluate(el => el.type);
+            const inputName = await input.evaluate(el => el.name);
+            const inputPlaceholder = await input.evaluate(el => el.placeholder);
+            const inputId = await input.evaluate(el => el.id);
+            const inputClass = await input.evaluate(el => el.className);
+            
+            console.log(`Found input: type=${inputType}, name=${inputName}, placeholder=${inputPlaceholder}, id=${inputId}, class=${inputClass}`);
+            
+            if (inputType === 'password' || 
+                (inputName && inputName.toLowerCase().includes('pass')) ||
+                (inputPlaceholder && inputPlaceholder.toLowerCase().includes('pass')) ||
+                (inputId && inputId.toLowerCase().includes('pass')) ||
+                (inputClass && inputClass.toLowerCase().includes('pass'))) {
+              passInputHandle = input;
+              foundSelector = 'generic search';
+              console.log('Found password field via generic search');
+              break;
+            }
+          }
+        } catch (e) {
+          console.log('Generic input search failed:', e);
+        }
+      }
+      
+      if (!passInputHandle) {
+        // Take a screenshot for debugging
+        try {
+          const debugShot = await page.screenshot({ fullPage: true });
+          console.log('Debug screenshot taken, size:', debugShot.length);
+        } catch (e) {
+          console.log('Could not take debug screenshot');
+        }
+        throw new Error('Passcode input field not found after exhaustive search');
+      }
+      // Type the password using the found element
+      if (foundSelector === 'generic search') {
+        // For generic search, we have the element handle directly
+        await passInputHandle.type(docsendPassword);
+      } else {
+        // For selector-based search, use the selector
+        await inputFrame.type(foundSelector, docsendPassword);
+      }
       console.log('Passcode typed into field');
       // Click Continue button via XPath in page or frames
       const continueXPath = "//button[contains(normalize-space(.), 'Continue')]";
