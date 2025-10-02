@@ -817,7 +817,7 @@ expressApp.post('/slack/events', (req, res) => {
         console.log('Found DocSend link:', messageText);
         
         // Extract DocSend URL (handle both /view/ and /v/ formats, with or without angle brackets)
-        const docsendUrl = messageText.match(/<?(https:\/\/docsend\.com\/(?:view\/|v\/)[a-zA-Z0-9]+(?:\/[a-zA-Z0-9\-]+)?)>?/)?.[1];
+        const docsendUrl = messageText.match(/<?(https:\/\/docsend\.com\/(?:view\/|v\/)[a-zA-Z0-9\/\-]+)>?/)?.[1];
         if (docsendUrl) {
           console.log('Extracted DocSend URL:', docsendUrl);
           
