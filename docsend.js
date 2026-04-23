@@ -30,7 +30,105 @@ async function dismissCookieBanner(page) {
   }
 }
 
+/**
+ * Capture a "vertical" DocSend doc (body.vertical). Unlike slide decks,
+ * vertical docs stack all pages in the DOM as <img class="preso-view page-view">
+ * with data-pagenum. ArrowRight does nothing useful here, so we iterate the
+ * image elements directly and screenshot each one at its natural resolution.
+ */
+async function captureVerticalPages(page, { onCheckpoint = noop } = {}) {
+  console.log('Capturing vertical document pages (per-image strategy)...');
+  // Hide UI chrome + cookie banner so nothing overlays the page images
+  await page.evaluate(() => {
+    const selectors = [
+      'header', '.header', '.top-bar', '.presentation-toolbar',
+      '.navbar-fixed-bottom', '.bottom-bar', '.presentation-fixed-footer',
+      '#onetrust-consent-sdk'
+    ];
+    selectors.forEach(sel =>
+      document.querySelectorAll(sel).forEach(el => el.style.display = 'none')
+    );
+  });
+  await page.waitForTimeout(1500);
+  await onCheckpoint('capture-ready-vertical', { page });
+
+  const handles = await page.$$('img.preso-view.page-view');
+  console.log(`Found ${handles.length} vertical page images`);
+  if (handles.length === 0) {
+    throw new Error('No img.preso-view.page-view elements found on vertical doc');
+  }
+
+  const screenshots = [];
+  for (let i = 0; i < handles.length; i++) {
+    const img = handles[i];
+    const info = await img.evaluate(el => ({
+      pageNum: el.getAttribute('data-pagenum'),
+      naturalWidth: el.naturalWidth,
+      naturalHeight: el.naturalHeight,
+      complete: el.complete
+    }));
+    console.log(`Page ${i + 1}/${handles.length} (pagenum=${info.pageNum}, ${info.naturalWidth}x${info.naturalHeight}, complete=${info.complete})`);
+
+    // Wait for image fully decoded
+    await img.evaluate(el => {
+      if (el.complete && el.naturalWidth > 0) return;
+      return new Promise(resolve => {
+        const done = () => resolve();
+        el.addEventListener('load', done, { once: true });
+        el.addEventListener('error', done, { once: true });
+        setTimeout(done, 5000);
+      });
+    });
+
+    // Scroll page so the image's top sits at the top of the viewport, then
+    // capture its full document-space bounding box via page.screenshot + clip.
+    // elementHandle.screenshot() in puppeteer 10 clips to viewport, so for any
+    // image taller than the viewport we'd lose content above/below.
+    const clip = await img.evaluate(el => {
+      el.scrollIntoView({ block: 'start', behavior: 'instant' });
+      const r = el.getBoundingClientRect();
+      return {
+        x: r.left + window.scrollX,
+        y: r.top + window.scrollY,
+        width: r.width,
+        height: r.height
+      };
+    });
+    await page.waitForTimeout(300);
+
+    let shot;
+    try {
+      shot = await page.screenshot({
+        type: 'jpeg',
+        quality: 80,
+        clip,
+        captureBeyondViewport: true
+      });
+    } catch (e) {
+      // Older puppeteer without captureBeyondViewport — fall back to element handle
+      console.log(`clip screenshot failed (${e.message}), falling back to element screenshot`);
+      shot = await img.screenshot({ type: 'jpeg', quality: 80 });
+    }
+    screenshots.push(shot);
+    await onCheckpoint(`capture-vertical-page-${i + 1}`, { page, extra: info });
+  }
+
+  console.log(`Captured ${screenshots.length} vertical pages`);
+  return screenshots;
+}
+
 async function capturePages(page, { onCheckpoint = noop } = {}) {
+  // Branch for vertical DocSend docs — body.vertical is set on portrait/long-form docs
+  // where ArrowRight navigation doesn't work and the landscape viewport clips content.
+  // Kill switch: set VERTICAL_CAPTURE_LEGACY=1 to force old behavior.
+  const isVertical = await page.evaluate(() =>
+    document.body && document.body.classList && document.body.classList.contains('vertical')
+  );
+  if (isVertical && process.env.VERTICAL_CAPTURE_LEGACY !== '1') {
+    console.log('Detected vertical DocSend doc');
+    return captureVerticalPages(page, { onCheckpoint });
+  }
+
   console.log('Capturing document pages...');
   await page.evaluate(() => {
     const selectors = [
@@ -622,5 +720,6 @@ module.exports = {
   createPDFFromScreenshots,
   dismissCookieBanner,
   capturePages,
+  captureVerticalPages,
   DEFAULT_LAUNCH_ARGS
 };
