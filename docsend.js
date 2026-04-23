@@ -62,6 +62,7 @@ async function captureVerticalPages(page, { onCheckpoint = noop } = {}) {
   for (let i = 0; i < handles.length; i++) {
     const img = handles[i];
     const info = await img.evaluate(el => ({
+      src: el.src,
       pageNum: el.getAttribute('data-pagenum'),
       naturalWidth: el.naturalWidth,
       naturalHeight: el.naturalHeight,
@@ -80,35 +81,46 @@ async function captureVerticalPages(page, { onCheckpoint = noop } = {}) {
       });
     });
 
-    // Scroll page so the image's top sits at the top of the viewport, then
-    // capture its full document-space bounding box via page.screenshot + clip.
-    // elementHandle.screenshot() in puppeteer 10 clips to viewport, so for any
-    // image taller than the viewport we'd lose content above/below.
-    const clip = await img.evaluate(el => {
-      el.scrollIntoView({ block: 'start', behavior: 'instant' });
-      const r = el.getBoundingClientRect();
-      return {
-        x: r.left + window.scrollX,
-        y: r.top + window.scrollY,
-        width: r.width,
-        height: r.height
-      };
-    });
-    await page.waitForTimeout(300);
-
-    let shot;
+    // Primary strategy: fetch the image bytes directly from its CDN URL via the
+    // browser context (so session cookies carry). This sidesteps all rendering
+    // quirks (letterboxing, DocSend viewer CSS) and gives us the natural-res
+    // image. Fall back to a DOM-clip screenshot if fetch fails.
+    let shot = null;
     try {
-      shot = await page.screenshot({
-        type: 'jpeg',
-        quality: 80,
-        clip,
-        captureBeyondViewport: true
+      const bytes = await page.evaluate(async (url) => {
+        const resp = await fetch(url, { credentials: 'include' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const buf = new Uint8Array(await resp.arrayBuffer());
+        return Array.from(buf);
+      }, info.src);
+      shot = Buffer.from(bytes);
+      console.log(`  fetched ${shot.length} bytes from CDN`);
+    } catch (fetchErr) {
+      console.log(`  direct fetch failed (${fetchErr.message}), falling back to screenshot`);
+      const clip = await img.evaluate(el => {
+        el.scrollIntoView({ block: 'start', behavior: 'instant' });
+        const r = el.getBoundingClientRect();
+        return {
+          x: r.left + window.scrollX,
+          y: r.top + window.scrollY,
+          width: r.width,
+          height: r.height
+        };
       });
-    } catch (e) {
-      // Older puppeteer without captureBeyondViewport — fall back to element handle
-      console.log(`clip screenshot failed (${e.message}), falling back to element screenshot`);
-      shot = await img.screenshot({ type: 'jpeg', quality: 80 });
+      await page.waitForTimeout(300);
+      try {
+        shot = await page.screenshot({
+          type: 'jpeg',
+          quality: 80,
+          clip,
+          captureBeyondViewport: true
+        });
+      } catch (e) {
+        console.log(`  clip screenshot failed (${e.message}), falling back to element screenshot`);
+        shot = await img.screenshot({ type: 'jpeg', quality: 80 });
+      }
     }
+
     screenshots.push(shot);
     await onCheckpoint(`capture-vertical-page-${i + 1}`, { page, extra: info });
   }
@@ -676,16 +688,23 @@ async function createPDFFromScreenshots(screenshots) {
     console.log(`Screenshot ${i + 1} buffer size: ${screenshots[i].length} bytes`);
 
     try {
-      const jpegImage = await pdfDoc.embedJpg(screenshots[i]);
-      console.log(`Successfully loaded JPEG image ${i + 1}, dimensions: ${jpegImage.width}x${jpegImage.height}`);
-      const page = pdfDoc.addPage([jpegImage.width, jpegImage.height]);
-      page.drawImage(jpegImage, {
+      // Detect format by magic bytes — screenshots may be JPEG (puppeteer) or
+      // PNG (CDN-fetched image) depending on the capture path taken.
+      const buf = screenshots[i];
+      const isPng = buf.length >= 8 &&
+        buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47;
+      const img = isPng
+        ? await pdfDoc.embedPng(buf)
+        : await pdfDoc.embedJpg(buf);
+      console.log(`Successfully loaded ${isPng ? 'PNG' : 'JPEG'} image ${i + 1}, dimensions: ${img.width}x${img.height}`);
+      const page = pdfDoc.addPage([img.width, img.height]);
+      page.drawImage(img, {
         x: 0,
         y: 0,
-        width: jpegImage.width,
-        height: jpegImage.height,
+        width: img.width,
+        height: img.height,
       });
-      console.log(`Successfully added page ${i + 1} as JPEG`);
+      console.log(`Successfully added page ${i + 1} as ${isPng ? 'PNG' : 'JPEG'}`);
     } catch (error) {
       console.error(`Error processing screenshot ${i + 1}:`, error);
       throw new Error(`Failed to process screenshot ${i + 1}: ${error.message}`);
