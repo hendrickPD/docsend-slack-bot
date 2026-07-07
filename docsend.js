@@ -201,13 +201,16 @@ async function capturePages(page, { onCheckpoint = noop } = {}) {
   while (true) {
     console.log(`Taking screenshot of page ${pageNum}`);
     const shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 80 });
-    screenshots.push(shot);
     const current = await page.evaluate(() => {
       const el = document.querySelector('span[aria-label="page number"]');
       return el ? parseInt(el.textContent, 10) : null;
     });
     await onCheckpoint(`capture-page-${pageNum}`, { page, extra: { reportedPageNumber: current, lastPage } });
-    if (current === lastPage) break;
+    // Page counter didn't advance → we already captured this page last
+    // iteration; drop the duplicate shot. (Keep the first shot even when the
+    // counter is missing so a counter-less viewer still yields one page.)
+    if (current === lastPage && screenshots.length > 0) break;
+    screenshots.push(shot);
     lastPage = current;
     pageNum++;
     await page.keyboard.press('ArrowRight');
