@@ -298,7 +298,9 @@ async function capturePages(page, { onCheckpoint = noop } = {}) {
     () => !document.querySelector('.loading-spinner') && !document.querySelector('.loading'),
     { timeout: 30000 }
   );
-  await page.waitForTimeout(3000);
+  // The preso-view waitForSelector below covers slide readiness; this is just
+  // a short settle for layout after hiding the UI chrome.
+  await page.waitForTimeout(1000);
 
   // Decks render each slide as <img class="preso-view page-view">. Wait for the
   // first one so we don't start capturing a blank viewer. If it never appears
@@ -343,7 +345,18 @@ async function capturePages(page, { onCheckpoint = noop } = {}) {
       () => !document.querySelector('.loading-spinner') && !document.querySelector('.loading'),
       { timeout: 30000 }
     );
-    await page.waitForTimeout(2000);
+    // Wait for the page counter to advance instead of sleeping a fixed 2s.
+    // On the last slide it never advances — the 2s timeout fires once and the
+    // duplicate-page check above terminates the loop, same as before.
+    await page.waitForFunction(
+      (prev) => {
+        const el = document.querySelector('span[aria-label="page number"]');
+        return el && parseInt(el.textContent, 10) !== prev;
+      },
+      { timeout: 2000 },
+      current
+    ).catch(() => {});
+    await page.waitForTimeout(300);
   }
   console.log(`Captured ${screenshots.length} pages`);
   return screenshots;
@@ -704,7 +717,7 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
 
     console.log('Hiding cookie banners and overlays...');
     console.log('Waiting for page to stabilize...');
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(1500);
     await onCheckpoint('before-ccpa', { page });
 
     console.log('Looking for CCPA iframe...');
@@ -716,69 +729,49 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
       'iframe[src*="cookie"]'
     ];
 
+    // Single non-blocking pass: the page has already sat through the login flow
+    // and a stabilization wait, so any consent iframe is in the DOM by now.
+    // (The old retry loop waitForSelector'd 5 selectors × 5s × 10 rounds ≈ 4.5
+    // minutes per capture when no banner existed — which is the normal case.)
     let cookieBannerFound = false;
-    let retryCount = 0;
-    const maxRetries = 10;
-
-    while (!cookieBannerFound && retryCount < maxRetries) {
-      await page.waitForTimeout(2000);
-      for (const selector of ccpaIframeSelectors) {
-        try {
-          const iframeElement = await page.waitForSelector(selector, { timeout: 5000 });
-          if (iframeElement) {
-            console.log(`Found CCPA iframe with selector: ${selector}`);
-            const frame = await iframeElement.contentFrame();
-            if (frame) {
-              console.log('Successfully accessed iframe content');
-              try {
-                const acceptButton = await frame.waitForSelector('#accept_all_cookies_button', { timeout: 5000 });
-                if (acceptButton) {
-                  console.log('Found accept button in iframe');
-                  const isVisible = await acceptButton.evaluate(el => {
-                    const style = window.getComputedStyle(el);
-                    return style.display !== 'none' &&
-                           style.visibility !== 'hidden' &&
-                           style.opacity !== '0' &&
-                           el.offsetWidth > 0 &&
-                           el.offsetHeight > 0;
-                  });
-                  if (isVisible) {
-                    try {
-                      await acceptButton.click();
-                      console.log('Clicked accept button using click() method');
-                    } catch (clickError) {
-                      console.log('Click method failed, trying evaluate...');
-                      await acceptButton.evaluate(el => el.click());
-                      console.log('Clicked accept button using evaluate() method');
-                    }
-                    cookieBannerFound = true;
-                    break;
-                  }
-                }
-              } catch (error) {
-                console.log('Accept button not found in iframe yet:', error);
-              }
-            }
+    for (const selector of ccpaIframeSelectors) {
+      try {
+        const iframeElement = await page.$(selector);
+        if (!iframeElement) continue;
+        console.log(`Found CCPA iframe with selector: ${selector}`);
+        const frame = await iframeElement.contentFrame();
+        if (!frame) continue;
+        const acceptButton = await frame.$('#accept_all_cookies_button');
+        if (!acceptButton) continue;
+        const isVisible = await acceptButton.evaluate(el => {
+          const style = window.getComputedStyle(el);
+          return style.display !== 'none' &&
+                 style.visibility !== 'hidden' &&
+                 style.opacity !== '0' &&
+                 el.offsetWidth > 0 &&
+                 el.offsetHeight > 0;
+        });
+        if (isVisible) {
+          try {
+            await acceptButton.click();
+          } catch (clickError) {
+            await acceptButton.evaluate(el => el.click());
           }
-        } catch (error) {
-          console.log(`Error with iframe selector ${selector}:`, error);
+          console.log('Clicked CCPA accept button');
+          cookieBannerFound = true;
+          break;
         }
-      }
-
-      if (!cookieBannerFound) {
-        retryCount++;
-        if (retryCount < maxRetries) {
-          console.log(`Retry ${retryCount}/${maxRetries} to find CCPA iframe...`);
-        }
+      } catch (error) {
+        console.log(`Error with iframe selector ${selector}:`, error.message);
       }
     }
 
     if (!cookieBannerFound) {
-      console.log('No CCPA iframe or accept button found after all attempts');
+      console.log('No CCPA iframe found; banner elements are hidden during capture anyway');
     }
 
-    await page.waitForTimeout(2000);
-    await onCheckpoint('after-ccpa', { page, extra: { cookieBannerFound, retryCount } });
+    await page.waitForTimeout(500);
+    await onCheckpoint('after-ccpa', { page, extra: { cookieBannerFound } });
 
     console.log('Proceeding to capture document pages');
     try {
