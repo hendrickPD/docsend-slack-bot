@@ -160,6 +160,111 @@ async function captureVerticalPages(page, { onCheckpoint = noop } = {}) {
   return screenshots;
 }
 
+/**
+ * Capture the currently-active slide image of a DocSend deck. Decks render each
+ * slide as <img class="preso-view page-view" data-pagenum="N">; only the active
+ * slide is shown at a time and advanced with ArrowRight. Grabbing the decoded
+ * <img> bytes (canvas re-encode, then CDN fetch) instead of a viewport
+ * screenshot avoids the blank/white pages that happen when the screenshot fires
+ * before the slide has painted. Returns a Buffer, or null when no slide <img> is
+ * present so the caller can fall back to a full-page screenshot.
+ */
+async function captureSlideImage(page, pageNum) {
+  const handle = await page.evaluateHandle((pn) => {
+    const imgs = Array.from(document.querySelectorAll('img.preso-view.page-view'));
+    if (imgs.length === 0) return null;
+    // Prefer the image whose data-pagenum matches the reported page number.
+    if (pn !== null && pn !== undefined) {
+      const match = imgs.find(el => String(el.getAttribute('data-pagenum')) === String(pn));
+      if (match) return match;
+    }
+    // Otherwise the largest currently-visible slide image (the active slide).
+    const visible = imgs
+      .map(el => ({ el, r: el.getBoundingClientRect() }))
+      .filter(({ el, r }) => {
+        const s = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden';
+      })
+      .sort((a, b) => (b.r.width * b.r.height) - (a.r.width * a.r.height));
+    return visible.length ? visible[0].el : null;
+  }, pageNum);
+
+  const img = handle.asElement();
+  if (!img) {
+    await handle.dispose();
+    return null;
+  }
+
+  try {
+    // Wait for the slide image to finish decoding before reading its pixels.
+    await img.evaluate(el => {
+      if (el.complete && el.naturalWidth > 0) return;
+      return new Promise(resolve => {
+        const done = () => resolve();
+        el.addEventListener('load', done, { once: true });
+        el.addEventListener('error', done, { once: true });
+        setTimeout(done, 5000);
+      });
+    });
+
+    const info = await img.evaluate(el => ({
+      src: el.src,
+      naturalWidth: el.naturalWidth,
+      naturalHeight: el.naturalHeight
+    }));
+    console.log(`  slide image ${info.naturalWidth}x${info.naturalHeight} (reported page ${pageNum})`);
+
+    // Strategy 1: re-encode the already-decoded <img> through a canvas. No new
+    // network request (can't hit expired signed URLs) and yields natural
+    // resolution. Requires --disable-web-security for the cross-origin read.
+    if (info.naturalWidth > 0) {
+      try {
+        const dataUrl = await img.evaluate(el => {
+          const canvas = document.createElement('canvas');
+          canvas.width = el.naturalWidth;
+          canvas.height = el.naturalHeight;
+          canvas.getContext('2d').drawImage(el, 0, 0);
+          return canvas.toDataURL('image/jpeg', 0.9);
+        });
+        const buf = Buffer.from(dataUrl.split(',')[1], 'base64');
+        console.log(`  canvas re-encode: ${buf.length} bytes`);
+        return buf;
+      } catch (canvasErr) {
+        console.log(`  canvas re-encode failed (${canvasErr.message})`);
+      }
+    }
+
+    // Strategy 2: fetch the image bytes from its URL in the page context
+    // (session cookies carry).
+    if (info.src) {
+      try {
+        const bytes = await page.evaluate(async (url) => {
+          const resp = await fetch(url, { credentials: 'include' });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          return Array.from(new Uint8Array(await resp.arrayBuffer()));
+        }, info.src);
+        const buf = Buffer.from(bytes);
+        console.log(`  fetched ${buf.length} bytes from CDN`);
+        return buf;
+      } catch (fetchErr) {
+        console.log(`  direct fetch failed (${fetchErr.message})`);
+      }
+    }
+
+    // Strategy 3: element screenshot of the slide image itself.
+    try {
+      const shot = await img.screenshot({ type: 'jpeg', quality: 80 });
+      console.log(`  element screenshot: ${shot.length} bytes`);
+      return shot;
+    } catch (shotErr) {
+      console.log(`  element screenshot failed (${shotErr.message})`);
+      return null;
+    }
+  } finally {
+    await handle.dispose();
+  }
+}
+
 async function capturePages(page, { onCheckpoint = noop } = {}) {
   // Branch for vertical DocSend docs — body.vertical is set on portrait/long-form docs
   // where ArrowRight navigation doesn't work and the landscape viewport clips content.
@@ -194,17 +299,37 @@ async function capturePages(page, { onCheckpoint = noop } = {}) {
     { timeout: 30000 }
   );
   await page.waitForTimeout(3000);
+
+  // Decks render each slide as <img class="preso-view page-view">. Wait for the
+  // first one so we don't start capturing a blank viewer. If it never appears
+  // (unexpected viewer markup) we still proceed and rely on full-page fallback.
+  try {
+    await page.waitForSelector('img.preso-view.page-view', { timeout: 15000 });
+  } catch (e) {
+    console.log('No preso-view slide image appeared within timeout; relying on full-page screenshots');
+  }
+
   await onCheckpoint('capture-ready', { page });
   const screenshots = [];
   let lastPage = null;
   let pageNum = 1;
   while (true) {
-    console.log(`Taking screenshot of page ${pageNum}`);
-    const shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 80 });
     const current = await page.evaluate(() => {
       const el = document.querySelector('span[aria-label="page number"]');
       return el ? parseInt(el.textContent, 10) : null;
     });
+    console.log(`Capturing page ${pageNum} (reported page number ${current})`);
+
+    // Prefer the decoded slide <img> over a viewport screenshot — a full-page
+    // screenshot goes white if the slide image hasn't painted yet, which is what
+    // produced blank PDF pages. Fall back to a full-page shot only if no slide
+    // image is present.
+    let shot = await captureSlideImage(page, current);
+    if (!shot) {
+      shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 80 });
+      console.log(`  full-page screenshot fallback: ${shot.length} bytes`);
+    }
+
     await onCheckpoint(`capture-page-${pageNum}`, { page, extra: { reportedPageNumber: current, lastPage } });
     // Page counter didn't advance → we already captured this page last
     // iteration; drop the duplicate shot. (Keep the first shot even when the
@@ -770,5 +895,6 @@ module.exports = {
   dismissCookieBanner,
   capturePages,
   captureVerticalPages,
+  captureSlideImage,
   DEFAULT_LAUNCH_ARGS
 };
