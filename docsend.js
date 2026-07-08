@@ -58,17 +58,16 @@ async function captureVerticalPages(page, { onCheckpoint = noop } = {}) {
     throw new Error('No img.preso-view.page-view elements found on vertical doc');
   }
 
+  const originalViewport = page.viewport();
+  let viewportDirty = false;
+
   const screenshots = [];
   for (let i = 0; i < handles.length; i++) {
     const img = handles[i];
-    const info = await img.evaluate(el => ({
-      src: el.src,
-      pageNum: el.getAttribute('data-pagenum'),
-      naturalWidth: el.naturalWidth,
-      naturalHeight: el.naturalHeight,
-      complete: el.complete
-    }));
-    console.log(`Page ${i + 1}/${handles.length} (pagenum=${info.pageNum}, ${info.naturalWidth}x${info.naturalHeight}, complete=${info.complete})`);
+
+    // Scroll the image into view FIRST — vertical docs lazy-load page images,
+    // so below-the-fold pages may not even have a real src until visible.
+    await img.evaluate(el => el.scrollIntoView({ block: 'start', behavior: 'instant' }));
 
     // Wait for image fully decoded
     await img.evaluate(el => {
@@ -81,48 +80,80 @@ async function captureVerticalPages(page, { onCheckpoint = noop } = {}) {
       });
     });
 
-    // Primary strategy: fetch the image bytes directly from its CDN URL via the
-    // browser context (so session cookies carry). This sidesteps all rendering
-    // quirks (letterboxing, DocSend viewer CSS) and gives us the natural-res
-    // image. Fall back to a DOM-clip screenshot if fetch fails.
+    const info = await img.evaluate(el => ({
+      src: el.src,
+      pageNum: el.getAttribute('data-pagenum'),
+      naturalWidth: el.naturalWidth,
+      naturalHeight: el.naturalHeight,
+      complete: el.complete
+    }));
+    console.log(`Page ${i + 1}/${handles.length} (pagenum=${info.pageNum}, ${info.naturalWidth}x${info.naturalHeight}, complete=${info.complete})`);
+
     let shot = null;
-    try {
-      const bytes = await page.evaluate(async (url) => {
-        const resp = await fetch(url, { credentials: 'include' });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        const buf = new Uint8Array(await resp.arrayBuffer());
-        return Array.from(buf);
-      }, info.src);
-      shot = Buffer.from(bytes);
-      console.log(`  fetched ${shot.length} bytes from CDN`);
-    } catch (fetchErr) {
-      console.log(`  direct fetch failed (${fetchErr.message}), falling back to screenshot`);
-      const clip = await img.evaluate(el => {
-        el.scrollIntoView({ block: 'start', behavior: 'instant' });
-        const r = el.getBoundingClientRect();
-        return {
-          x: r.left + window.scrollX,
-          y: r.top + window.scrollY,
-          width: r.width,
-          height: r.height
-        };
-      });
-      await page.waitForTimeout(300);
+
+    // Strategy 1: re-encode the already-decoded <img> through a canvas. No new
+    // network request, so it can't hit expired signed URLs, and it yields the
+    // natural-resolution image. Requires --disable-web-security (canvas taint).
+    if (info.naturalWidth > 0) {
       try {
-        shot = await page.screenshot({
-          type: 'jpeg',
-          quality: 80,
-          clip,
-          captureBeyondViewport: true
+        const dataUrl = await img.evaluate(el => {
+          const canvas = document.createElement('canvas');
+          canvas.width = el.naturalWidth;
+          canvas.height = el.naturalHeight;
+          canvas.getContext('2d').drawImage(el, 0, 0);
+          return canvas.toDataURL('image/jpeg', 0.9);
         });
-      } catch (e) {
-        console.log(`  clip screenshot failed (${e.message}), falling back to element screenshot`);
-        shot = await img.screenshot({ type: 'jpeg', quality: 80 });
+        shot = Buffer.from(dataUrl.split(',')[1], 'base64');
+        console.log(`  canvas re-encode: ${shot.length} bytes`);
+      } catch (canvasErr) {
+        console.log(`  canvas re-encode failed (${canvasErr.message})`);
       }
+    }
+
+    // Strategy 2: fetch the image bytes from its URL in the browser context
+    // (session cookies carry).
+    if (!shot) {
+      try {
+        const bytes = await page.evaluate(async (url) => {
+          const resp = await fetch(url, { credentials: 'include' });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const buf = new Uint8Array(await resp.arrayBuffer());
+          return Array.from(buf);
+        }, info.src);
+        shot = Buffer.from(bytes);
+        console.log(`  fetched ${shot.length} bytes from CDN`);
+      } catch (fetchErr) {
+        console.log(`  direct fetch failed (${fetchErr.message}), falling back to screenshot`);
+      }
+    }
+
+    // Strategy 3: element screenshot with the viewport grown to fit the whole
+    // page image. Chromium paints regions outside the viewport BLACK when
+    // screenshotting past it (this is what produced half-black PDF pages), so
+    // never capture beyond the viewport — make the viewport big enough instead.
+    if (!shot) {
+      const rect = await img.evaluate(el => {
+        const r = el.getBoundingClientRect();
+        return { width: Math.ceil(r.width), height: Math.ceil(r.height) };
+      });
+      const needW = Math.max(originalViewport.width, rect.width);
+      const needH = Math.max(originalViewport.height, rect.height);
+      if (page.viewport().width < needW || page.viewport().height < needH) {
+        await page.setViewport({ width: needW, height: needH });
+        viewportDirty = true;
+      }
+      await img.evaluate(el => el.scrollIntoView({ block: 'start', behavior: 'instant' }));
+      await page.waitForTimeout(500);
+      shot = await img.screenshot({ type: 'jpeg', quality: 80 });
+      console.log(`  element screenshot: ${shot.length} bytes`);
     }
 
     screenshots.push(shot);
     await onCheckpoint(`capture-vertical-page-${i + 1}`, { page, extra: info });
+  }
+
+  if (viewportDirty) {
+    await page.setViewport(originalViewport);
   }
 
   console.log(`Captured ${screenshots.length} vertical pages`);
@@ -170,13 +201,16 @@ async function capturePages(page, { onCheckpoint = noop } = {}) {
   while (true) {
     console.log(`Taking screenshot of page ${pageNum}`);
     const shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 80 });
-    screenshots.push(shot);
     const current = await page.evaluate(() => {
       const el = document.querySelector('span[aria-label="page number"]');
       return el ? parseInt(el.textContent, 10) : null;
     });
     await onCheckpoint(`capture-page-${pageNum}`, { page, extra: { reportedPageNumber: current, lastPage } });
-    if (current === lastPage) break;
+    // Page counter didn't advance → we already captured this page last
+    // iteration; drop the duplicate shot. (Keep the first shot even when the
+    // counter is missing so a counter-less viewer still yields one page.)
+    if (current === lastPage && screenshots.length > 0) break;
+    screenshots.push(shot);
     lastPage = current;
     pageNum++;
     await page.keyboard.press('ArrowRight');
@@ -216,16 +250,12 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
     page.on('console', msg => console.log('Browser console:', msg.text()));
 
     await page.setUserAgent('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    // NOTE: extra headers apply to EVERY request (CSS, XHR, images), not just
+    // navigations. Forcing Sec-Fetch-*/Accept on subresources makes Chrome
+    // reject them (net::ERR_INVALID_ARGUMENT) and the viewer renders unstyled
+    // with no page images, so only set headers that are valid everywhere.
     await page.setExtraHTTPHeaders({
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-      'Sec-Fetch-Site': 'none',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-User': '?1',
-      'Sec-Fetch-Dest': 'document',
-      'Upgrade-Insecure-Requests': '1',
-      'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache'
+      'Accept-Language': 'en-US,en;q=0.9'
     });
 
     await page.setBypassCSP(true);
