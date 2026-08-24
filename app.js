@@ -36,6 +36,33 @@ expressApp.use((req, res, next) => {
 // Track processed messages to prevent duplicates
 const processedMessages = new Set();
 
+// Serialize conversions: each one spawns a headless Chrome, and running several
+// at once exceeds the instance's memory and gets the process OOM-killed (exit 137)
+const conversionQueue = [];
+let conversionActive = false;
+
+function enqueueConversion(job) {
+  conversionQueue.push(job);
+  if (!conversionActive) {
+    processNextConversion();
+  }
+}
+
+async function processNextConversion() {
+  const job = conversionQueue.shift();
+  if (!job) {
+    conversionActive = false;
+    return;
+  }
+  conversionActive = true;
+  try {
+    await job();
+  } catch (error) {
+    console.error('Conversion job failed:', error);
+  }
+  processNextConversion();
+}
+
 // Health check function
 async function checkHealth() {
   console.log('Running health check...');
@@ -181,14 +208,17 @@ expressApp.post('/slack/events', (req, res) => {
           processedMessages.add(messageKey);
 
           // Send initial response
+          const queueAhead = conversionQueue.length + (conversionActive ? 1 : 0);
           app.client.chat.postMessage({
             channel: event.channel,
-            text: `Converting DocSend document to PDF...`,
+            text: queueAhead > 0
+              ? `Queued DocSend conversion (${queueAhead} ahead of it)...`
+              : `Converting DocSend document to PDF...`,
             thread_ts: event.thread_ts || event.ts
           }).catch(console.error);
 
-          // Convert to screenshots and create PDF
-          convertDocSendToPDF(docsendUrl, messageText)
+          // Convert to screenshots and create PDF, one document at a time
+          enqueueConversion(() => convertDocSendToPDF(docsendUrl, messageText)
             .then(async (screenshots) => {
               if (!screenshots || !Array.isArray(screenshots)) {
                 throw new Error('No screenshots returned from convertDocSendToPDF');
@@ -235,7 +265,7 @@ expressApp.post('/slack/events', (req, res) => {
                 text: `Sorry, I couldn't convert the DocSend document. It might require special access or have security restrictions.`,
                 thread_ts: event.thread_ts || event.ts
               });
-            });
+            }));
         }
       }
     }
