@@ -6,6 +6,11 @@ const fs = require('fs');
 const path = require('path');
 const { convertDocSendToPDF, createPDFFromScreenshots } = require('./docsend');
 const { convertPitchToPDF } = require('./pitch');
+const { closeSharedBrowser } = require('./browser');
+
+// Full request/event/signature logging is only useful when debugging; the
+// always-on version buried real log lines under health checks firing every 5s.
+const DEBUG = process.env.DEBUG_LOGS === '1';
 
 // Initialize Express app
 const expressApp = express();
@@ -26,16 +31,31 @@ expressApp.use((req, res, next) => {
   });
 });
 
-// Add request logging middleware
+// Add request logging middleware (health checks and header/body dumps are
+// DEBUG-only noise)
 expressApp.use((req, res, next) => {
-  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
-  console.log('Headers:', req.headers);
-  console.log('Body:', req.body);
+  const isHealthCheck = req.headers['render-health-check'] === '1';
+  if (!isHealthCheck || DEBUG) {
+    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  }
+  if (DEBUG) {
+    console.log('Headers:', req.headers);
+    console.log('Body:', req.body);
+  }
   next();
 });
 
-// Track processed messages to prevent duplicates
+// Track processed messages to prevent duplicates. Capped so the set doesn't
+// grow forever — Set preserves insertion order, so the oldest entry goes first.
 const processedMessages = new Set();
+const MAX_PROCESSED_MESSAGES = 500;
+
+function markMessageProcessed(messageKey) {
+  processedMessages.add(messageKey);
+  if (processedMessages.size > MAX_PROCESSED_MESSAGES) {
+    processedMessages.delete(processedMessages.values().next().value);
+  }
+}
 
 // Serialize conversions: each one spawns a headless Chrome, and running several
 // at once exceeds the instance's memory and gets the process OOM-killed (exit 137)
@@ -53,6 +73,8 @@ async function processNextConversion() {
   const job = conversionQueue.shift();
   if (!job) {
     conversionActive = false;
+    // Free the shared Chromium's memory while the bot sits idle.
+    closeSharedBrowser().catch(console.error);
     return;
   }
   conversionActive = true;
@@ -123,11 +145,13 @@ const verifySlackRequest = (req) => {
     .update(sigBasestring)
     .digest('hex')}`;
 
-  console.log('Verifying signature:', {
-    received: signature,
-    computed: mySignature,
-    basestring: sigBasestring
-  });
+  if (DEBUG) {
+    console.log('Verifying signature:', {
+      received: signature,
+      computed: mySignature,
+      basestring: sigBasestring
+    });
+  }
 
   return crypto.timingSafeEqual(
     Buffer.from(signature),
@@ -137,7 +161,12 @@ const verifySlackRequest = (req) => {
 
 // Handle Slack events directly
 expressApp.post('/slack/events', (req, res) => {
-  console.log('Received Slack event:', JSON.stringify(req.body));
+  if (DEBUG) {
+    console.log('Received Slack event:', JSON.stringify(req.body));
+  } else {
+    const ev = req.body.event || {};
+    console.log(`Received Slack event: ${req.body.type}/${ev.type || ''}${ev.subtype ? `/${ev.subtype}` : ''} channel=${ev.channel || ''} ts=${ev.ts || ''}`);
+  }
 
   // Verify request signature
   if (!verifySlackRequest(req)) {
@@ -214,7 +243,7 @@ expressApp.post('/slack/events', (req, res) => {
           }
 
           // Mark this message as processed
-          processedMessages.add(messageKey);
+          markMessageProcessed(messageKey);
 
           // Send initial response
           const queueAhead = conversionQueue.length + (conversionActive ? 1 : 0);

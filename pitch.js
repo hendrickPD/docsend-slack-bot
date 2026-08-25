@@ -1,5 +1,5 @@
 const puppeteer = require('puppeteer');
-const { DEFAULT_LAUNCH_ARGS } = require('./docsend');
+const { DEFAULT_LAUNCH_ARGS, getSharedBrowser } = require('./browser');
 
 const noop = async () => {};
 
@@ -8,6 +8,13 @@ const noop = async () => {};
 // longer tell us anything).
 const MAX_TOTAL_STEPS = 400;
 const MAX_LAST_SLIDE_STEPS = 6;
+
+// Pacing. After a press we wait for the slide counter to move (fast when the
+// player responds fast) instead of a fixed sleep, then give the transition /
+// build animation a short settle before screenshotting. The settle is the
+// lever if captures ever show mid-transition frames.
+const COUNTER_WAIT_MS = 700;
+const STEP_SETTLE_MS = 450;
 
 /**
  * Capture a pitch.com deck (share links like pitch.com/v/<slug>). The player
@@ -27,14 +34,16 @@ async function convertPitchToPDF(url, messageText, opts = {}) {
 
   console.log('Starting Pitch deck capture for:', url);
 
+  // Explicit launchOptions get a dedicated browser; production conversions
+  // share one across the queue.
+  const dedicated = Object.keys(launchOptions).length > 0;
   let browser;
+  let page;
   try {
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: DEFAULT_LAUNCH_ARGS,
-      ...launchOptions
-    });
-    const page = await browser.newPage();
+    browser = dedicated
+      ? await puppeteer.launch({ headless: 'new', args: DEFAULT_LAUNCH_ARGS, ...launchOptions })
+      : await getSharedBrowser();
+    page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080 });
     await page.setDefaultNavigationTimeout(60000);
     page.on('console', msg => console.log('Browser console:', msg.text()));
@@ -68,21 +77,30 @@ async function convertPitchToPDF(url, messageText, opts = {}) {
     let current = await readCurrent();
     let latest = await snap();
     let lastSlideSteps = 0;
+    let slideStart = Date.now();
 
     for (let step = 0; step < MAX_TOTAL_STEPS; step++) {
       await page.keyboard.press('ArrowRight');
-      await page.waitForTimeout(800);
+      // Wait for the counter to move (times out quietly on build steps and on
+      // the last slide), then let the transition animation settle.
+      await page.waitForFunction((prev) => {
+        const counter = document.querySelector('.player-v2-chrome-controls-slide-count');
+        const m = counter && counter.textContent.match(/(\d+)\s*\//);
+        return m && parseInt(m[1], 10) !== prev;
+      }, { timeout: COUNTER_WAIT_MS, polling: 100 }, current).catch(() => {});
+      await page.waitForTimeout(STEP_SETTLE_MS);
       const c = await readCurrent();
       const shot = await snap();
 
       if (c !== current) {
         // Moved to a new slide — commit the previous slide's final state.
         screenshots.push(latest);
-        console.log(`Captured slide ${current}${total ? `/${total}` : ''}`);
+        console.log(`Captured slide ${current}${total ? `/${total}` : ''} (${Date.now() - slideStart}ms)`);
         await onCheckpoint(`pitch-slide-${current}`, { page });
         current = c;
         latest = shot;
         lastSlideSteps = 0;
+        slideStart = Date.now();
         continue;
       }
       if (shot.equals(latest)) {
@@ -99,7 +117,7 @@ async function convertPitchToPDF(url, messageText, opts = {}) {
       }
     }
     screenshots.push(latest);
-    console.log(`Captured slide ${current}${total ? `/${total}` : ''}`);
+    console.log(`Captured slide ${current}${total ? `/${total}` : ''} (${Date.now() - slideStart}ms)`);
 
     console.log(`Captured ${screenshots.length} Pitch slides`);
     return screenshots;
@@ -107,8 +125,10 @@ async function convertPitchToPDF(url, messageText, opts = {}) {
     console.error('Error capturing Pitch deck:', error);
     throw error;
   } finally {
-    if (browser) {
+    if (dedicated && browser) {
       await browser.close();
+    } else if (page) {
+      await page.close().catch(() => {});
     }
   }
 }

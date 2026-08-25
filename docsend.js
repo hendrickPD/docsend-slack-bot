@@ -1,21 +1,8 @@
 const puppeteer = require('puppeteer');
 const { PDFDocument } = require('pdf-lib');
+const { DEFAULT_LAUNCH_ARGS, getSharedBrowser } = require('./browser');
 
 const noop = async () => {};
-
-const DEFAULT_LAUNCH_ARGS = [
-  '--no-sandbox',
-  '--disable-setuid-sandbox',
-  '--disable-dev-shm-usage',
-  '--disable-gpu',
-  '--disable-web-security',
-  '--disable-features=IsolateOrigins,site-per-process',
-  '--disable-site-isolation-trials',
-  '--disable-features=BlockInsecurePrivateNetworkRequests',
-  '--disable-features=IsolateOrigins',
-  '--disable-site-isolation-trials',
-  '--disable-blink-features=AutomationControlled'
-];
 
 async function dismissCookieBanner(page) {
   console.log('Attempting to dismiss cookie banners...');
@@ -534,14 +521,15 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
 
   console.log('Starting document capture for:', url);
 
+  // Explicit launchOptions (the debug harness: headful, devtools, slowMo) get
+  // a dedicated browser; production conversions share one across the queue.
+  const dedicated = Object.keys(launchOptions).length > 0;
   let browser;
   let page;
   try {
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: DEFAULT_LAUNCH_ARGS,
-      ...launchOptions
-    });
+    browser = dedicated
+      ? await puppeteer.launch({ headless: 'new', args: DEFAULT_LAUNCH_ARGS, ...launchOptions })
+      : await getSharedBrowser();
     page = await browser.newPage();
 
     await page.setViewport({ width: 1920, height: 1080 });
@@ -978,8 +966,12 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
     }
     throw error;
   } finally {
-    if (browser && !keepOpenOnError) {
-      await browser.close();
+    if (!keepOpenOnError) {
+      if (dedicated && browser) {
+        await browser.close();
+      } else if (page) {
+        await page.close().catch(() => {});
+      }
     }
   }
 }
