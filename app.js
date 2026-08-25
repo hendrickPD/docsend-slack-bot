@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { convertDocSendToPDF, createPDFFromScreenshots } = require('./docsend');
+const { convertPitchToPDF } = require('./pitch');
 
 // Initialize Express app
 const expressApp = express();
@@ -180,23 +181,31 @@ expressApp.post('/slack/events', (req, res) => {
         messageId = event.client_msg_id || '';
       }
 
-      // Check if the message contains a DocSend link
-      if (messageText && messageText.includes('docsend.com')) {
-        console.log('Found DocSend link:', messageText);
+      // Check if the message contains a DocSend or Pitch link
+      if (messageText && (messageText.includes('docsend.com') || messageText.includes('pitch.com'))) {
+        console.log('Found document link:', messageText);
 
         // Extract DocSend URL (handle both /view/ and /v/ formats, with or without angle brackets, and custom subdomains)
         const docsendUrl = messageText.match(/<?(https:\/\/(?:[a-zA-Z0-9-]+\.)?docsend\.com\/(?:view\/|v\/)[a-zA-Z0-9\/\-_]+)>?/)?.[1];
-        if (docsendUrl) {
-          console.log('Extracted DocSend URL:', docsendUrl);
+        // Extract Pitch URL (share links: pitch.com/v/<slug>, older pitch.com/public/<id>)
+        const pitchUrl = messageText.match(/<?(https:\/\/pitch\.com\/(?:v|public)\/[a-zA-Z0-9\/\-_]+)>?/)?.[1];
+        const docUrl = docsendUrl || pitchUrl;
+        if (docUrl) {
+          const provider = docsendUrl ? 'DocSend' : 'Pitch';
+          const convert = docsendUrl ? convertDocSendToPDF : convertPitchToPDF;
+          console.log(`Extracted ${provider} URL:`, docUrl);
 
-          // Extract document ID from URL (handle both /view/ and /v/ formats)
-          const docId = docsendUrl.includes('/view/')
-            ? docsendUrl.split('/view/')[1].split('/')[0]
-            : docsendUrl.split('/v/')[1].split('/')[0];
+          // Extract document ID from URL (last path segment; for DocSend the
+          // segment after /view/ or /v/, for Pitch the deck slug)
+          const docId = docsendUrl
+            ? (docsendUrl.includes('/view/')
+                ? docsendUrl.split('/view/')[1].split('/')[0]
+                : docsendUrl.split('/v/')[1].split('/')[0])
+            : pitchUrl.split('/').filter(Boolean).pop();
           console.log('Extracted document ID:', docId);
 
           // Create a unique key for this message
-          const messageKey = `${messageId}_${docsendUrl}`;
+          const messageKey = `${messageId}_${docUrl}`;
 
           // Check if we've already processed this message
           if (processedMessages.has(messageKey)) {
@@ -212,16 +221,16 @@ expressApp.post('/slack/events', (req, res) => {
           app.client.chat.postMessage({
             channel: event.channel,
             text: queueAhead > 0
-              ? `Queued DocSend conversion (${queueAhead} ahead of it)...`
-              : `Converting DocSend document to PDF...`,
+              ? `Queued ${provider} conversion (${queueAhead} ahead of it)...`
+              : `Converting ${provider} document to PDF...`,
             thread_ts: event.thread_ts || event.ts
           }).catch(console.error);
 
           // Convert to screenshots and create PDF, one document at a time
-          enqueueConversion(() => convertDocSendToPDF(docsendUrl, messageText)
+          enqueueConversion(() => convert(docUrl, messageText)
             .then(async (screenshots) => {
               if (!screenshots || !Array.isArray(screenshots)) {
-                throw new Error('No screenshots returned from convertDocSendToPDF');
+                throw new Error(`No screenshots returned from ${provider} conversion`);
               }
               console.log(`Captured ${screenshots.length} pages, creating PDF...`);
 
@@ -241,9 +250,9 @@ expressApp.post('/slack/events', (req, res) => {
                   channel_id: event.channel,
                   file: pdfBuffer,
                   filename: `${docId}.pdf`,
-                  title: `DocSend Document ${docId}`,
+                  title: `${provider} Document ${docId}`,
                   thread_ts: event.thread_ts || event.ts,
-                  initial_comment: 'Here is your DocSend document converted to PDF.'
+                  initial_comment: `Here is your ${provider} document converted to PDF.`
                 });
 
                 console.log('PDF uploaded successfully:', {
@@ -257,12 +266,12 @@ expressApp.post('/slack/events', (req, res) => {
               }
             })
             .catch(async (error) => {
-              console.error('Error processing DocSend:', error);
+              console.error(`Error processing ${provider} document:`, error);
 
               // Use a generic error message instead of showing the specific error
               await app.client.chat.postMessage({
                 channel: event.channel,
-                text: `Sorry, I couldn't convert the DocSend document. It might require special access or have security restrictions.`,
+                text: `Sorry, I couldn't convert the ${provider} document. It might require special access or have security restrictions.`,
                 thread_ts: event.thread_ts || event.ts
               });
             }));
