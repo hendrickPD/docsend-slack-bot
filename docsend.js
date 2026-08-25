@@ -265,6 +265,158 @@ async function captureSlideImage(page, pageNum) {
   }
 }
 
+/**
+ * Spreadsheets aren't rendered as preso-view slides: DocSend embeds a Dropbox
+ * previews iframe (name="previews-iframe", /p/xls_html/ URL) whose document
+ * holds one div.sheet-content per workbook sheet — each a full HTML <table> —
+ * toggled by a#tabstrip-link-N tabs and clipped by a fixed-height #wrapper.
+ */
+async function findSpreadsheetFrame(page) {
+  const frame = page.frames().find(f => f.url().includes('previews.dropboxusercontent.com'));
+  if (!frame) return null;
+  if (frame.url().includes('/p/xls_html/')) return frame;
+  const hasSheets = await frame.$('.sheet-content').catch(() => null);
+  return hasSheets ? frame : null;
+}
+
+// Sheets larger than these bounds are clipped with a log line. As in the
+// vertical-capture path above, Chromium paints regions outside the viewport
+// BLACK when screenshotting past it, so each sheet's capture grows the
+// viewport to fit the sheet — the height bound keeps that raster from blowing
+// memory on the 512MB instance.
+const SPREADSHEET_MAX_WIDTH = 4400;
+const SPREADSHEET_MAX_HEIGHT = 8000;
+
+async function captureSpreadsheetPages(page, frame, { onCheckpoint = noop } = {}) {
+  const tabCount = await frame.$$eval('a.tabstrip-link', els => els.length).catch(() => 0);
+  console.log(`Spreadsheet preview detected with ${tabCount} sheet tab(s)`);
+
+  // Hide the "Cookies & CCPA preferences" link (a.presentation-privacy-policy_text,
+  // fixed to the viewport's bottom-right) and the consent iframe via a
+  // stylesheet so neither is stamped onto the captures.
+  await page.addStyleTag({
+    content: '#ccpa-iframe, iframe[src*="ccpa"], [class*="presentation-privacy-policy"] { display: none !important; }'
+  });
+
+  // Let the iframe and its ancestors grow past the viewer's fixed-height clip
+  // so the screenshot clip below can cover a whole sheet.
+  await page.evaluate(() => {
+    const iframe = document.getElementById('previews-iframe') ||
+      document.querySelector('iframe[data-testid="spreadsheet-iframe"], iframe[name="previews-iframe"]');
+    for (let el = iframe && iframe.parentElement; el; el = el.parentElement) {
+      el.style.overflow = 'visible';
+      el.style.maxHeight = 'none';
+      if (el.style.height && el.style.height !== 'auto') el.style.height = 'auto';
+    }
+  });
+
+  const originalViewport = page.viewport();
+
+  const screenshots = [];
+  const sheetCount = Math.max(tabCount, 1);
+  for (let i = 0; i < sheetCount; i++) {
+    if (tabCount > 0) {
+      const label = await frame.evaluate((idx) => {
+        const link = document.getElementById(`tabstrip-link-${idx}`);
+        if (!link) return null;
+        link.click();
+        return link.textContent.trim();
+      }, i);
+      console.log(`Capturing sheet ${i + 1}/${sheetCount}: ${label}`);
+      await frame.waitForFunction((idx) => {
+        const sheet = document.querySelectorAll('.sheet-content')[idx];
+        return sheet && sheet.style.display !== 'none';
+      }, { timeout: 15000 }, i).catch(() =>
+        console.log('  sheet did not become visible; capturing current state')
+      );
+      await page.waitForTimeout(400);
+    }
+
+    // Size the wrapper and iframe to the active sheet's full content.
+    const dims = await frame.evaluate((idx, maxWidth) => {
+      const sheet = document.querySelectorAll('.sheet-content')[idx] || document.body;
+      const tabstrip = document.getElementById('tabstrip');
+      const wrapper = document.getElementById('wrapper');
+      if (wrapper) { wrapper.style.height = 'auto'; wrapper.style.overflow = 'visible'; }
+      document.body.style.overflow = 'visible';
+      window.scrollTo(0, 0);
+      const contentW = Math.max(sheet.scrollWidth, 200) + 20;
+      const contentH = Math.max(sheet.scrollHeight, 200) + (tabstrip ? tabstrip.offsetHeight : 0) + 20;
+      const isEmpty = sheet.innerText.trim().length === 0 && !sheet.querySelector('img');
+      return { contentW, contentH, isEmpty };
+    }, i, SPREADSHEET_MAX_WIDTH);
+    if (dims.isEmpty) {
+      console.log('  sheet has no content; skipping');
+      continue;
+    }
+    const sheetW = Math.min(dims.contentW, SPREADSHEET_MAX_WIDTH);
+    const sheetH = Math.min(dims.contentH, SPREADSHEET_MAX_HEIGHT);
+    if (dims.contentW > SPREADSHEET_MAX_WIDTH) {
+      console.log(`  sheet is ${dims.contentW}px wide; clipping to ${SPREADSHEET_MAX_WIDTH}px`);
+    }
+    if (dims.contentH > SPREADSHEET_MAX_HEIGHT) {
+      console.log(`  sheet is ${dims.contentH}px tall; clipping to ${SPREADSHEET_MAX_HEIGHT}px`);
+    }
+
+    const box = await page.evaluate((w, h) => {
+      const iframe = document.getElementById('previews-iframe') ||
+        document.querySelector('iframe[data-testid="spreadsheet-iframe"], iframe[name="previews-iframe"]');
+      iframe.style.width = `${w}px`;
+      iframe.style.height = `${h}px`;
+      iframe.style.maxWidth = 'none';
+      window.scrollTo(0, 0);
+      const rect = iframe.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: w, height: h };
+    }, sheetW, sheetH);
+
+    // Grow the viewport to contain the whole sheet, then screenshot the iframe
+    // region — everything inside the viewport, so nothing paints black. The
+    // viewport only ever grows across the loop: shrinking it between sheets
+    // made Chromium's next rasterization come back solid black.
+    const needW = Math.max(page.viewport().width, Math.ceil(box.x + box.width));
+    const needH = Math.max(page.viewport().height, Math.ceil(box.y + box.height));
+    if (needW > page.viewport().width || needH > page.viewport().height) {
+      await page.setViewport({ width: needW, height: needH });
+    }
+    // Wait until the frame has actually painted at the new size.
+    await frame.evaluate(() =>
+      new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
+    ).catch(() => {});
+    await page.waitForTimeout(300);
+
+    const clip = {
+      x: Math.round(box.x),
+      y: Math.round(box.y),
+      width: Math.round(box.width),
+      height: Math.round(box.height)
+    };
+    // Discard the first capture after the viewport change: Chromium's first
+    // rasterization at the new size can come back solid black.
+    await page.screenshot({ type: 'jpeg', quality: 30, clip });
+    // And occasionally the buffer itself is corrupt; retry once, then skip the
+    // sheet rather than poison the whole PDF (createPDFFromScreenshots throws
+    // on an invalid image).
+    const isValidImage = b => Buffer.isBuffer(b) && b.length > 4 &&
+      ((b[0] === 0xFF && b[1] === 0xD8) || (b[0] === 0x89 && b[1] === 0x50));
+    let shot = await page.screenshot({ type: 'jpeg', quality: 80, clip });
+    if (!isValidImage(shot)) {
+      console.log('  screenshot buffer invalid; retrying once');
+      await page.waitForTimeout(500);
+      shot = await page.screenshot({ type: 'jpeg', quality: 80, clip });
+    }
+    if (isValidImage(shot)) {
+      console.log(`  captured ${clip.width}x${clip.height} sheet: ${shot.length} bytes`);
+      screenshots.push(shot);
+    } else {
+      console.log(`  skipping sheet ${i + 1}: invalid screenshot buffer after retry`);
+    }
+    await onCheckpoint(`capture-sheet-${i + 1}`, { page, extra: { sheet: i + 1, of: sheetCount, ...dims } });
+  }
+  await page.setViewport(originalViewport);
+  console.log(`Captured ${screenshots.length} spreadsheet page(s) across ${sheetCount} sheet(s)`);
+  return screenshots;
+}
+
 async function capturePages(page, { onCheckpoint = noop } = {}) {
   // Branch for vertical DocSend docs — body.vertical is set on portrait/long-form docs
   // where ArrowRight navigation doesn't work and the landscape viewport clips content.
@@ -275,6 +427,16 @@ async function capturePages(page, { onCheckpoint = noop } = {}) {
   if (isVertical && process.env.VERTICAL_CAPTURE_LEGACY !== '1') {
     console.log('Detected vertical DocSend doc');
     return captureVerticalPages(page, { onCheckpoint });
+  }
+
+  // Branch for spreadsheets, which render sheet tables in a previews iframe —
+  // the slide-deck loop below would only ever see one "page".
+  // Kill switch: set SPREADSHEET_CAPTURE_LEGACY=1 to force old behavior.
+  if (process.env.SPREADSHEET_CAPTURE_LEGACY !== '1') {
+    const spreadsheetFrame = await findSpreadsheetFrame(page);
+    if (spreadsheetFrame) {
+      return captureSpreadsheetPages(page, spreadsheetFrame, { onCheckpoint });
+    }
   }
 
   console.log('Capturing document pages...');
@@ -838,7 +1000,10 @@ async function createPDFFromScreenshots(screenshots) {
     try {
       // Detect format by magic bytes — screenshots may be JPEG (puppeteer) or
       // PNG (CDN-fetched image) depending on the capture path taken.
-      const buf = screenshots[i];
+      // Copy into a standalone allocation: pdf-lib reads the Buffer's backing
+      // ArrayBuffer from offset 0, which for small pooled Buffers is shared
+      // memory with a nonzero byteOffset ("SOI not found in JPEG").
+      const buf = Uint8Array.from(screenshots[i]);
       const isPng = buf.length >= 8 &&
         buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47;
       const img = isPng
@@ -888,6 +1053,7 @@ module.exports = {
   dismissCookieBanner,
   capturePages,
   captureVerticalPages,
+  captureSpreadsheetPages,
   captureSlideImage,
   DEFAULT_LAUNCH_ARGS
 };
