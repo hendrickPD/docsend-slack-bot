@@ -117,6 +117,35 @@ function parkConversion(kind, { channel, threadTs, provider, convert, docUrl, do
   console.log(`Parked conversion of ${docUrl} pending ${kind}`);
 }
 
+// The email entered at DocSend's gate is the poster's own Slack profile
+// email when the app may read it (bot scope users:read.email, plus
+// users:read), so a verification link lands in their inbox rather than the
+// shared DOCSEND_EMAIL one. Cached per user; a missing scope is logged once.
+const userEmailCache = new Map();
+let userEmailScopeWarned = false;
+
+async function lookupPosterEmail(userId) {
+  if (!userId) return null;
+  if (userEmailCache.has(userId)) return userEmailCache.get(userId);
+  let email = null;
+  try {
+    const result = await app.client.users.info({ user: userId });
+    email = result.user?.profile?.email || null;
+    if (!email) console.log(`No profile email for Slack user ${userId}`);
+  } catch (error) {
+    if (error.data?.error === 'missing_scope') {
+      if (!userEmailScopeWarned) {
+        userEmailScopeWarned = true;
+        console.log('Cannot read poster emails: add the users:read and users:read.email bot scopes and reinstall the Slack app. Falling back to DOCSEND_EMAIL.');
+      }
+    } else {
+      console.log(`users.info failed for ${userId}:`, error.data?.error || error.message);
+    }
+  }
+  userEmailCache.set(userId, email);
+  return email;
+}
+
 const EMAIL_OVERRIDE_HINT = (email) =>
   `I used *${email}*. If the document was shared with a different address, reply here with that email and I'll use it instead.`;
 
@@ -504,8 +533,16 @@ expressApp.post('/slack/events', (req, res) => {
             thread_ts: threadTs
           }).catch(console.error);
 
-          // Convert to screenshots and create PDF, one document at a time
-          runConversion({ channel: event.channel, threadTs, provider, convert, docUrl, docId, messageText });
+          // Convert to screenshots and create PDF, one document at a time,
+          // entering the poster's own email at DocSend's gate when known.
+          const posterId = event.user || event.message?.user;
+          lookupPosterEmail(posterId).then((posterEmail) => {
+            if (posterEmail) console.log(`Using poster's email for DocSend gates: ${posterEmail}`);
+            runConversion({
+              channel: event.channel, threadTs, provider, convert, docUrl, docId, messageText,
+              convertOpts: posterEmail ? { email: posterEmail } : {}
+            });
+          });
         }
       }
     }
