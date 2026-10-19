@@ -6,9 +6,6 @@ This Slack bot automatically converts DocSend links shared in your Slack workspa
 
 - Automatically detects DocSend links in messages
 - Converts DocSend documents to PDF format
-- Converts every document in a DocSend dataroom (`/view/s/<id>`), one PDF each
-- Posts DocSend videos (single links or inside datarooms) as MP4 files, remuxed
-  from their HLS stream with ffmpeg (bundled via `ffmpeg-static`, nothing to install)
 - Shares the PDF directly in the Slack thread
 - Maintains document formatting and quality
 - Handles authentication with DocSend
@@ -53,10 +50,6 @@ This Slack bot automatically converts DocSend links shared in your Slack workspa
      DOCSEND_EMAIL=your-email@example.com
      DOCSEND_PASSWORD=your-password
      ```
-   - Optional: `VIDEO_MAX_HEIGHT` caps the video rendition posted to Slack
-     (default 1080; DocSend offers 480/720/1080) and `VIDEO_TIMEOUT_MINUTES`
-     bounds one video download (default 20). Videos over Slack's 1 GB limit
-     fall back to the next smaller rendition automatically.
 
 ## Usage
 

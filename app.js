@@ -3,10 +3,8 @@ const { App } = require('@slack/bolt');
 const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
-const https = require('https');
 const path = require('path');
 const { convertDocSendToPDF, createPDFFromScreenshots } = require('./docsend');
-const { downloadVideo, SLACK_MAX_BYTES } = require('./video');
 const { convertPitchToPDF } = require('./pitch');
 const { closeSharedBrowser } = require('./browser');
 const { classifyReply } = require('./threadReplies');
@@ -152,8 +150,7 @@ const EMAIL_OVERRIDE_HINT = (email) =>
   `I used *${email}*. If the document was shared with a different address, reply here with that email and I'll use it instead.`;
 
 // Dataroom entries that are not documents still open in the viewer, but the
-// PDF is only a snapshot: say so next to the file. (A video normally arrives
-// as an MP4 instead; this note covers one whose stream could not be found.)
+// PDF is only a snapshot: say so next to the file.
 function dataroomTypeNote(type) {
   if (type === 'WEB_LINK') return ' — a web link, so this is a snapshot of that page';
   if (type === 'PRESENTATION_VIDEO') return ' — a video, so this is its cover frame only';
@@ -161,17 +158,9 @@ function dataroomTypeNote(type) {
 }
 
 // Slack rejects some characters in filenames; keep titles readable otherwise.
-function safeFilename(title, fallback, ext) {
-  const base = String(title || '').replace(/[\\/:*?"<>|\x00-\x1f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
-  return `${base || fallback}.${ext}`;
-}
-
 function pdfFilename(title, fallback) {
-  return safeFilename(title, fallback, 'pdf');
-}
-
-function formatMb(bytes) {
-  return `${(bytes / 1048576).toFixed(bytes < 10 * 1048576 ? 1 : 0)} MB`;
+  const base = String(title || '').replace(/[\\/:*?"<>|\x00-\x1f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+  return `${base || fallback}.pdf`;
 }
 
 async function uploadPdf({ channel, threadTs, pdfBuffer, filename, title, initialComment }) {
@@ -195,87 +184,17 @@ async function uploadPdf({ channel, threadTs, pdfBuffer, filename, title, initia
   }
 }
 
-// Post a file that already sits on disk, streaming it: files.uploadV2 reads a
-// stream fully into memory first, and an MP4 can be a large share of this
-// instance's RAM. Same three steps Slack's SDK performs (external upload URL,
-// POST of the bytes, completeUploadExternal into the thread).
-async function uploadFileFromDisk({ channel, threadTs, filePath, filename, title, initialComment }) {
-  const { size } = await fs.promises.stat(filePath);
-  const { upload_url: uploadUrl, file_id: fileId } = await app.client.files.getUploadURLExternal({ filename, length: size });
-  await new Promise((resolve, reject) => {
-    const req = https.request(uploadUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': size }
-    }, (res) => {
-      let body = '';
-      res.setEncoding('utf8');
-      res.on('data', chunk => { if (body.length < 500) body += chunk.slice(0, 500); });
-      res.on('end', () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) resolve();
-        else reject(new Error(`Slack file upload returned HTTP ${res.statusCode}: ${body.slice(0, 200)}`));
-      });
-    });
-    req.setTimeout(15 * 60 * 1000, () => req.destroy(new Error('Slack file upload timed out')));
-    req.on('error', reject);
-    fs.createReadStream(filePath).on('error', (e) => req.destroy(e)).pipe(req);
-  });
-  const result = await app.client.files.completeUploadExternal({
-    files: [{ id: fileId, title }],
-    channel_id: channel,
-    thread_ts: threadTs,
-    initial_comment: initialComment
-  });
-  const file = result.files && result.files[0];
-  console.log('File uploaded successfully:', { file_id: file?.id || fileId, filename, size });
-  return file;
-}
-
-// Fetch a DocSend video as an MP4 (video.js: ffmpeg into a temp file) and
-// post it in the thread. The temp file is deleted whatever happens.
-async function postVideo({ channel, threadTs, title, playlistUrl, filename, initialComment }) {
-  console.log(`Fetching video "${title}" from ${playlistUrl.split('?')[0]}`);
-  const video = await downloadVideo(playlistUrl, { maxBytes: SLACK_MAX_BYTES });
-  try {
-    console.log(`Video ready: ${video.name} ${video.width}x${video.height}, ${formatMb(video.bytes)}; uploading to Slack...`);
-    await uploadFileFromDisk({ channel, threadTs, filePath: video.path, filename, title, initialComment });
-  } finally {
-    await video.cleanup();
-  }
-}
-
 // Convert one document (or every document of a dataroom) and post the result
 // (or the failure) in its thread.
 function runConversion({ channel, threadTs, provider, convert, docUrl, docId, messageText, convertOpts = {} }) {
   // Dataroom documents are posted one by one as they are captured, so the
   // pages of a 30-document room never sit in memory together.
   const onDocument = async (doc, index, total) => {
-    const label = `${index + 1}/${total}: *${doc.title}*${doc.folder ? ` (${doc.folder})` : ''}`;
     if (doc.webLink) {
       await app.client.chat.postMessage({
         channel, thread_ts: threadTs,
-        text: `${label} is a web link, not a document: ${doc.url}`
+        text: `${index + 1}/${total}: *${doc.title}*${doc.folder ? ` (${doc.folder})` : ''} is a web link, not a document: ${doc.url}`
       }).catch(console.error);
-      return;
-    }
-    if (doc.video) {
-      // Fetch right away: the playlist URL is signed and expires.
-      try {
-        await postVideo({
-          channel, threadTs,
-          title: doc.title,
-          playlistUrl: doc.playlistUrl,
-          filename: safeFilename(doc.title, `${docId}-${index + 1}`, 'mp4'),
-          initialComment: `${label} — video, posted as an MP4`
-        });
-      } catch (error) {
-        console.error(`Video "${doc.title}" failed:`, error);
-        await app.client.chat.postMessage({
-          channel, thread_ts: threadTs,
-          text: `${label} is a video I couldn't fetch as an MP4 (${error.message}). You can still watch it at ${doc.url}`
-        }).catch(console.error);
-        // Rethrow so the dataroom summary counts it among the failures.
-        throw error;
-      }
       return;
     }
     console.log(`Dataroom document ${index + 1}/${total} "${doc.title}": ${doc.screenshots.length} pages, creating PDF...`);
@@ -295,11 +214,9 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
         const webLinks = result.documents.filter(d => d.webLink);
         const converted = result.documents.filter(d => !d.error && !d.webLink);
         const failed = result.documents.filter(d => d.error);
-        const videos = converted.filter(d => d.video).length;
-        console.log(`Dataroom "${result.title}": ${converted.length} converted (${videos} videos), ${failed.length} failed, ${webLinks.length} web links`);
+        console.log(`Dataroom "${result.title}": ${converted.length} converted, ${failed.length} failed, ${webLinks.length} web links`);
         const lines = [
-          `Converted ${converted.length} of ${result.documents.length} entr${result.documents.length === 1 ? 'y' : 'ies'} from the DocSend dataroom *${result.title}*` +
-          (videos > 0 ? ` (${videos} of them ${videos === 1 ? 'is a video' : 'are videos'}, posted as MP4).` : '.')
+          `Converted ${converted.length} of ${result.documents.length} entr${result.documents.length === 1 ? 'y' : 'ies'} from the DocSend dataroom *${result.title}*.`
         ];
         if (webLinks.length > 0) {
           lines.push(`${webLinks.length} web link${webLinks.length === 1 ? '' : 's'} passed through as-is (see above).`);
@@ -309,22 +226,6 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
           failed.forEach(d => lines.push(`• ${d.folder ? `${d.folder} / ` : ''}${d.title}: ${d.error}`));
         }
         await app.client.chat.postMessage({ channel, thread_ts: threadTs, text: lines.join('\n') }).catch(console.error);
-        return;
-      }
-
-      if (result && result.video) {
-        const title = result.title || `DocSend video ${docId}`;
-        try {
-          await postVideo({
-            channel, threadTs, title,
-            playlistUrl: result.playlistUrl,
-            filename: safeFilename(title, docId, 'mp4'),
-            initialComment: `Here is the DocSend video *${title}* as an MP4.`
-          });
-        } catch (error) {
-          error.code = 'VIDEO_FAILED';
-          throw error;
-        }
         return;
       }
 
@@ -410,15 +311,6 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
           channel,
           thread_ts: threadTs,
           text: `That passcode didn't work. Reply here with the right one and I'll try again.`
-        }).catch(console.error);
-        return;
-      }
-
-      if (error.code === 'VIDEO_FAILED') {
-        console.error('Error fetching DocSend video:', error);
-        await app.client.chat.postMessage({
-          channel, thread_ts: threadTs,
-          text: `This DocSend link is a video, and I couldn't fetch it as an MP4: ${error.message}`
         }).catch(console.error);
         return;
       }
@@ -663,7 +555,7 @@ expressApp.post('/slack/events', (req, res) => {
             text: queueAhead > 0
               ? `Queued ${provider} conversion (${queueAhead} ahead of it)...`
               : isDataroom
-                ? 'Converting every document in the DocSend dataroom (PDFs, and videos as MP4)...'
+                ? 'Converting every document in the DocSend dataroom to PDF...'
                 : `Converting ${provider} document to PDF...`,
             thread_ts: threadTs
           }).catch(console.error);
