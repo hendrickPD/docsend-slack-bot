@@ -18,6 +18,43 @@ async function dismissCookieBanner(page) {
 }
 
 /**
+ * Some links have the owner's "verify email" option on: after the viewer
+ * submits their email, DocSend shows a "Check your email to continue" modal
+ * and emails a one-time verification link. Nothing on the page gets us past
+ * it, so the caller has to come back with that link (see opts.verifyUrl).
+ */
+class EmailVerificationRequired extends Error {
+  constructor(email, cookies) {
+    super(`DocSend sent a verification link to ${email}; open it to continue`);
+    this.name = 'EmailVerificationRequired';
+    this.code = 'EMAIL_VERIFICATION_REQUIRED';
+    this.email = email;
+    this.cookies = cookies;
+  }
+}
+
+async function detectEmailVerificationWall(page) {
+  try {
+    return await page.evaluate(() => {
+      const visible = el => {
+        if (!el) return false;
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && el.offsetHeight > 0;
+      };
+      const prompt = document.querySelector('#prompt.modal, .modal.in');
+      const text = (prompt && visible(prompt)) ? prompt.innerText : '';
+      const bodyAuthorize = document.body.dataset.action === 'authorize'
+        && document.body.classList.contains('modal-open');
+      return /check your email|verification link/i.test(text)
+        || (bodyAuthorize && /verification link/i.test(document.body.innerText));
+    });
+  } catch (e) {
+    console.log('Verification-wall check failed:', e.message);
+    return false;
+  }
+}
+
+/**
  * Capture a "vertical" DocSend doc (body.vertical). Unlike slide decks,
  * vertical docs stack all pages in the DOM as <img class="preso-view page-view">
  * with data-pagenum. ArrowRight does nothing useful here, so we iterate the
@@ -516,10 +553,16 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
     launchOptions = {},
     onCheckpoint = noop,
     keepOpenOnError = false,
-    email = process.env.DOCSEND_EMAIL
+    email = process.env.DOCSEND_EMAIL,
+    // Resuming after an email-verification wall: the one-time link DocSend
+    // emailed, plus the cookies of the session that requested it (the link
+    // may only authorize that session).
+    verifyUrl = null,
+    cookies = null
   } = opts;
 
   console.log('Starting document capture for:', url);
+  if (verifyUrl) console.log('Resuming with verification link');
 
   // Explicit launchOptions (the debug harness: headful, devtools, slowMo) get
   // a dedicated browser; production conversions share one across the queue.
@@ -549,11 +592,32 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
     await page.setBypassCSP(true);
     await page.setJavaScriptEnabled(true);
 
-    console.log('Navigating to URL...');
-    await page.goto(url, {
-      waitUntil: 'networkidle0',
-      timeout: 120000
-    });
+    if (cookies && cookies.length) {
+      await page.setCookie(...cookies).catch(e => console.log('Could not restore cookies:', e.message));
+    }
+
+    if (verifyUrl) {
+      console.log('Opening verification link...');
+      await page.goto(verifyUrl, { waitUntil: 'networkidle0', timeout: 120000 });
+      await onCheckpoint('verify-link-loaded', { page, extra: { landed: page.url() } });
+      // The link normally lands on the authorized document. If it parked us
+      // somewhere else (a "you're verified" page), go to the document now that
+      // the session is authorized.
+      const onDocument = await page.evaluate(() =>
+        document.body.dataset.action === 'view'
+        || !!document.querySelector('img.preso-view, .document-thumb-container, input[type="email"], input[name="passcode"]')
+      ).catch(() => false);
+      if (!onDocument) {
+        console.log(`Verification link landed on ${page.url()}; navigating to the document`);
+        await page.goto(url, { waitUntil: 'networkidle0', timeout: 120000 });
+      }
+    } else {
+      console.log('Navigating to URL...');
+      await page.goto(url, {
+        waitUntil: 'networkidle0',
+        timeout: 120000
+      });
+    }
     console.log('Page loaded');
 
     console.log('Waiting for document to be fully loaded...');
@@ -865,6 +929,16 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
       }
     }
 
+    if (await detectEmailVerificationWall(page)) {
+      await onCheckpoint('email-verification-wall', { page });
+      if (verifyUrl) {
+        throw new Error('Still asked to verify email after opening the verification link; it may have expired or been used already');
+      }
+      console.log(`Email verification required; DocSend emailed a link to ${email}`);
+      const sessionCookies = await page.cookies().catch(() => []);
+      throw new EmailVerificationRequired(email, sessionCookies);
+    }
+
     console.log('Hiding cookie banners and overlays...');
     console.log('Waiting for page to stabilize...');
     await page.waitForTimeout(1500);
@@ -954,6 +1028,9 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
       }
     }
   } catch (error) {
+    if (error.code === 'EMAIL_VERIFICATION_REQUIRED') {
+      throw error;
+    }
     console.error('Error capturing document:', error);
     if (page) {
       try {
@@ -1040,6 +1117,7 @@ async function createPDFFromScreenshots(screenshots) {
 }
 
 module.exports = {
+  EmailVerificationRequired,
   convertDocSendToPDF,
   createPDFFromScreenshots,
   dismissCookieBanner,

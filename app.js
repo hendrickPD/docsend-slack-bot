@@ -86,6 +86,97 @@ async function processNextConversion() {
   processNextConversion();
 }
 
+// DocSend links with the owner's "verify email" option on: the conversion is
+// parked here until someone pastes the verification link DocSend emailed into
+// the same thread. Keyed by channel + thread so the reply can be matched.
+const pendingVerifications = new Map();
+const PENDING_VERIFICATION_TTL_MS = 30 * 60 * 1000;
+
+function pendingKey(channel, threadTs) {
+  return `${channel}:${threadTs}`;
+}
+
+function getPendingVerification(channel, threadTs) {
+  const key = pendingKey(channel, threadTs);
+  const pending = pendingVerifications.get(key);
+  if (!pending) return null;
+  if (Date.now() - pending.createdAt > PENDING_VERIFICATION_TTL_MS) {
+    pendingVerifications.delete(key);
+    return null;
+  }
+  return pending;
+}
+
+// Slack wraps links as <url|label> and HTML-escapes "&". The one-time token
+// lives in the query string, so keep the whole URL intact.
+function extractDocSendVerificationUrl(text) {
+  const match = text.match(/<?(https:\/\/(?:[a-zA-Z0-9-]+\.)?docsend\.com\/[^\s<>|]+)/);
+  if (!match) return null;
+  return match[1]
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/[.,;:)]+$/, '');
+}
+
+// Convert one document and post the result (or the failure) in its thread.
+function runConversion({ channel, threadTs, provider, convert, docUrl, docId, messageText, convertOpts = {} }) {
+  enqueueConversion(() => convert(docUrl, messageText, convertOpts)
+    .then(async (screenshots) => {
+      if (!screenshots || !Array.isArray(screenshots)) {
+        throw new Error(`No screenshots returned from ${provider} conversion`);
+      }
+      console.log(`Captured ${screenshots.length} pages, creating PDF...`);
+
+      const pdfBuffer = await createPDFFromScreenshots(screenshots);
+      if (!pdfBuffer || !Buffer.isBuffer(pdfBuffer)) {
+        throw new Error('Invalid PDF buffer generated');
+      }
+      console.log('PDF buffer size:', pdfBuffer.length, 'bytes');
+
+      try {
+        const result = await app.client.files.uploadV2({
+          channel_id: channel,
+          file: pdfBuffer,
+          filename: `${docId}.pdf`,
+          title: `${provider} Document ${docId}`,
+          thread_ts: threadTs,
+          initial_comment: `Here is your ${provider} document converted to PDF.`
+        });
+        console.log('PDF uploaded successfully:', {
+          file_id: result.file?.id,
+          permalink: result.file?.permalink,
+          size: result.file?.size
+        });
+      } catch (uploadError) {
+        console.error('Error uploading PDF:', uploadError);
+        throw new Error(`Failed to upload PDF: ${uploadError.message}`);
+      }
+    })
+    .catch(async (error) => {
+      if (error.code === 'EMAIL_VERIFICATION_REQUIRED') {
+        pendingVerifications.set(pendingKey(channel, threadTs), {
+          provider, convert, docUrl, docId, messageText,
+          cookies: error.cookies,
+          createdAt: Date.now()
+        });
+        console.log(`Parked conversion of ${docUrl} pending email verification`);
+        await app.client.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          text: `This link requires email verification. DocSend just emailed a verification link to ${error.email}. Open that email and paste the link here in this thread within 30 minutes, and I'll finish the conversion.`
+        }).catch(console.error);
+        return;
+      }
+
+      console.error(`Error processing ${provider} document:`, error);
+      const text = convertOpts.verifyUrl
+        ? `Sorry, that verification link didn't unlock the ${provider} document (it may have expired or already been used). Post the original link again to get a fresh one.`
+        : `Sorry, I couldn't convert the ${provider} document. It might require special access or have security restrictions.`;
+      await app.client.chat.postMessage({ channel, thread_ts: threadTs, text }).catch(console.error);
+    }));
+}
+
 // Health check function
 async function checkHealth() {
   console.log('Running health check...');
@@ -210,6 +301,43 @@ expressApp.post('/slack/events', (req, res) => {
         messageId = event.client_msg_id || '';
       }
 
+      // A reply in a thread where a conversion is parked waiting for the
+      // DocSend verification link: finish that conversion with the link.
+      const replyThreadTs = event.thread_ts || event.message?.thread_ts;
+      if (replyThreadTs && !event.bot_id && event.subtype !== 'message_deleted'
+          && messageText.includes('docsend.com')) {
+        const pending = getPendingVerification(event.channel, replyThreadTs);
+        const verifyUrl = pending ? extractDocSendVerificationUrl(messageText) : null;
+        if (pending && verifyUrl) {
+          const messageKey = `${messageId}_verify_${verifyUrl}`;
+          if (processedMessages.has(messageKey)) {
+            console.log('Verification message already processed, skipping');
+            return;
+          }
+          markMessageProcessed(messageKey);
+          pendingVerifications.delete(pendingKey(event.channel, replyThreadTs));
+          console.log('Received verification link for parked conversion of', pending.docUrl);
+
+          app.client.chat.postMessage({
+            channel: event.channel,
+            thread_ts: replyThreadTs,
+            text: 'Got the verification link, finishing the conversion...'
+          }).catch(console.error);
+
+          runConversion({
+            channel: event.channel,
+            threadTs: replyThreadTs,
+            provider: pending.provider,
+            convert: pending.convert,
+            docUrl: pending.docUrl,
+            docId: pending.docId,
+            messageText: pending.messageText,
+            convertOpts: { verifyUrl, cookies: pending.cookies }
+          });
+          return;
+        }
+      }
+
       // Check if the message contains a DocSend or Pitch link
       if (messageText && (messageText.includes('docsend.com') || messageText.includes('pitch.com'))) {
         console.log('Found document link:', messageText);
@@ -245,6 +373,8 @@ expressApp.post('/slack/events', (req, res) => {
           // Mark this message as processed
           markMessageProcessed(messageKey);
 
+          const threadTs = event.thread_ts || event.ts;
+
           // Send initial response
           const queueAhead = conversionQueue.length + (conversionActive ? 1 : 0);
           app.client.chat.postMessage({
@@ -252,58 +382,11 @@ expressApp.post('/slack/events', (req, res) => {
             text: queueAhead > 0
               ? `Queued ${provider} conversion (${queueAhead} ahead of it)...`
               : `Converting ${provider} document to PDF...`,
-            thread_ts: event.thread_ts || event.ts
+            thread_ts: threadTs
           }).catch(console.error);
 
           // Convert to screenshots and create PDF, one document at a time
-          enqueueConversion(() => convert(docUrl, messageText)
-            .then(async (screenshots) => {
-              if (!screenshots || !Array.isArray(screenshots)) {
-                throw new Error(`No screenshots returned from ${provider} conversion`);
-              }
-              console.log(`Captured ${screenshots.length} pages, creating PDF...`);
-
-              // Create PDF from screenshots
-              const pdfBuffer = await createPDFFromScreenshots(screenshots);
-
-              // Verify PDF buffer is valid
-              if (!pdfBuffer || !Buffer.isBuffer(pdfBuffer)) {
-                throw new Error('Invalid PDF buffer generated');
-              }
-
-              console.log('PDF buffer size:', pdfBuffer.length, 'bytes');
-
-              // Upload PDF to Slack using the newer uploadV2 method
-              try {
-                const result = await app.client.files.uploadV2({
-                  channel_id: event.channel,
-                  file: pdfBuffer,
-                  filename: `${docId}.pdf`,
-                  title: `${provider} Document ${docId}`,
-                  thread_ts: event.thread_ts || event.ts,
-                  initial_comment: `Here is your ${provider} document converted to PDF.`
-                });
-
-                console.log('PDF uploaded successfully:', {
-                  file_id: result.file?.id,
-                  permalink: result.file?.permalink,
-                  size: result.file?.size
-                });
-              } catch (uploadError) {
-                console.error('Error uploading PDF:', uploadError);
-                throw new Error(`Failed to upload PDF: ${uploadError.message}`);
-              }
-            })
-            .catch(async (error) => {
-              console.error(`Error processing ${provider} document:`, error);
-
-              // Use a generic error message instead of showing the specific error
-              await app.client.chat.postMessage({
-                channel: event.channel,
-                text: `Sorry, I couldn't convert the ${provider} document. It might require special access or have security restrictions.`,
-                thread_ts: event.thread_ts || event.ts
-              });
-            }));
+          runConversion({ channel: event.channel, threadTs, provider, convert, docUrl, docId, messageText });
         }
       }
     }

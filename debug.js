@@ -15,6 +15,10 @@ Flags:
   --slow-mo=MS       Slow each puppeteer action by MS ms (default: 50 when headful)
   --no-pdf           Skip building the output PDF
   --out-dir=PATH     Override output directory (default: ./debug/<timestamp>)
+  --verify-url=URL   Resume after an email-verification wall with the link
+                     DocSend emailed (a previous run wrote cookies.json; pass
+                     it with --cookies=PATH to reuse that session)
+  --cookies=PATH     cookies.json from the run that hit the verification wall
 
 Artifacts written per checkpoint:
   NN-<step>.png         Full-page screenshot
@@ -31,6 +35,9 @@ Artifacts written per checkpoint:
 const argv = process.argv.slice(2);
 if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) usage();
 
+const verifyUrlArg = argv.find(a => a.startsWith('--verify-url='));
+const verifyUrl = verifyUrlArg ? verifyUrlArg.slice('--verify-url='.length) : null;
+const cookiesArg = argv.find(a => a.startsWith('--cookies='));
 const url = argv.find(a => /^https?:\/\//.test(a));
 if (!url) {
   console.error('ERROR: no URL provided');
@@ -148,6 +155,13 @@ async function onCheckpoint(name, { page, frame, extra } = {}) {
   console.log(`Password: ${pwArg ? 'yes (from pw: arg)' : 'no'}`);
   console.log(`Headless: ${headless}  keepOpen: ${keepOpen}  devtools: ${devtools}  slowMo: ${slowMo}ms`);
   console.log(`DOCSEND_EMAIL: ${process.env.DOCSEND_EMAIL ? 'set' : 'NOT SET — will fail'}`);
+  if (verifyUrl) console.log(`Verification link: ${verifyUrl}`);
+  let cookies = null;
+  if (cookiesArg) {
+    const cookiesPath = cookiesArg.split('=')[1];
+    cookies = JSON.parse(fs.readFileSync(cookiesPath, 'utf8'));
+    console.log(`Cookies: ${cookies.length} from ${cookiesPath}`);
+  }
   console.log('');
 
   const executablePath =
@@ -170,9 +184,19 @@ async function onCheckpoint(name, { page, frame, extra } = {}) {
       launchOptions,
       onCheckpoint,
       keepOpenOnError: keepOpen && !headless,
+      verifyUrl,
+      cookies,
     });
     console.log(`Captured ${screenshots.length} screenshots`);
   } catch (e) {
+    if (e.code === 'EMAIL_VERIFICATION_REQUIRED') {
+      const cookiesPath = path.join(outDir, 'cookies.json');
+      fs.writeFileSync(cookiesPath, JSON.stringify(e.cookies || [], null, 2));
+      console.log(`EMAIL VERIFICATION REQUIRED: DocSend emailed a link to ${e.email}.`);
+      console.log(`Re-run with: node debug.js ${url} --verify-url='<link from email>' --cookies=${cookiesPath} ${headless ? '--headless' : ''}`);
+      traceFile.end();
+      process.exit(2);
+    }
     console.error(`FAILED: ${e.stack || e.message}`);
     console.error(`Artifacts in: ${outDir}`);
     traceFile.end();
