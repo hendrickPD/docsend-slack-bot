@@ -600,14 +600,17 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
       console.log('Opening verification link...');
       await page.goto(verifyUrl, { waitUntil: 'networkidle0', timeout: 120000 });
       await onCheckpoint('verify-link-loaded', { page, extra: { landed: page.url() } });
-      // The link normally lands on the authorized document. If it parked us
-      // somewhere else (a "you're verified" page), go to the document now that
-      // the session is authorized.
-      const onDocument = await page.evaluate(() =>
-        document.body.dataset.action === 'view'
-        || !!document.querySelector('img.preso-view, .document-thumb-container, input[type="email"], input[name="passcode"]')
-      ).catch(() => false);
-      if (!onDocument) {
+      if (/token_expired=true/.test(page.url())) {
+        throw new Error('The verification link has expired or was already used (DocSend returned token_expired=true)');
+      }
+      // The link authorizes the session but lands wherever DocSend sends it
+      // (for a dataroom document that is the dataroom root), so go to the
+      // requested document unless we are already on it.
+      const samePath = (a, b) => {
+        try { return new URL(a).pathname.replace(/\/$/, '') === new URL(b).pathname.replace(/\/$/, ''); }
+        catch (_) { return false; }
+      };
+      if (!samePath(page.url(), url)) {
         console.log(`Verification link landed on ${page.url()}; navigating to the document`);
         await page.goto(url, { waitUntil: 'networkidle0', timeout: 120000 });
       }
@@ -638,6 +641,9 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
       await onCheckpoint('email-iframe-detected', { page, frame: loginFrame });
       console.log('Email login iframe detected; entering DOCSEND_EMAIL');
       await loginFrame.waitForSelector('input[type="email"]', { timeout: 60000 });
+      // DocSend prefills the field from a remembered session; typing on top of
+      // that produces "a@b.coma@b.com" and a failed submit.
+      await loginFrame.$eval('input[type="email"]', el => { el.value = ''; }).catch(() => {});
       await loginFrame.type('input[type="email"]', email);
       console.log('Entered email in form');
       await onCheckpoint('email-typed-iframe', { page, frame: loginFrame });
@@ -733,6 +739,7 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
       await onCheckpoint('email-inline-detected', { page });
       console.log('Email login detected; entering DOCSEND_EMAIL');
       await page.waitForSelector('input[type="email"], input[name="email"]', { timeout: 60000 });
+      await page.$eval('input[type="email"], input[name="email"]', el => { el.value = ''; }).catch(() => {});
       await page.type('input[type="email"], input[name="email"]', email);
       console.log('Entered email in form');
       await onCheckpoint('email-typed-inline', { page });

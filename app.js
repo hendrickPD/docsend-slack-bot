@@ -107,16 +107,23 @@ function getPendingVerification(channel, threadTs) {
   return pending;
 }
 
-// Slack wraps links as <url|label> and HTML-escapes "&". The one-time token
-// lives in the query string, so keep the whole URL intact.
+// The emailed link is usually an email-tracking redirect (e.g. track.pstmrk.it)
+// whose path carries the docsend.com target URL-encoded, so accept any URL
+// that mentions docsend.com once decoded. Slack wraps links as <url|label>
+// and HTML-escapes "&"; the one-time token lives in the URL, so keep it intact.
 function extractDocSendVerificationUrl(text) {
-  const match = text.match(/<?(https:\/\/(?:[a-zA-Z0-9-]+\.)?docsend\.com\/[^\s<>|]+)/);
-  if (!match) return null;
-  return match[1]
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/[.,;:)]+$/, '');
+  const urls = text.match(/https?:\/\/[^\s<>|]+/g) || [];
+  for (const raw of urls) {
+    const cleaned = raw
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/[.,;:)]+$/, '');
+    let decoded = cleaned;
+    try { decoded = decodeURIComponent(decodeURIComponent(cleaned)); } catch (_) {}
+    if (/docsend\.com/i.test(decoded)) return cleaned;
+  }
+  return null;
 }
 
 // Convert one document and post the result (or the failure) in its thread.
