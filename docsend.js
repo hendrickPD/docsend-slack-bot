@@ -659,10 +659,50 @@ async function openViewerPage(browser, { cookies = null } = {}) {
 }
 
 /**
+ * A video document (DocSend "Document::PresentationVideoVersion"): the viewer
+ * embeds a video.js player whose props carry the signed HLS master playlist
+ * URL and the title. Returns { title, playlistUrl, thumbUrl } or null when the
+ * page is not a video.
+ */
+async function detectVideoDocument(page) {
+  try {
+    return await page.evaluate(() => {
+      const VIDEO_TYPE = 'Document::PresentationVideoVersion';
+      let props = null;
+      const wrapper = document.querySelector('[data-react-class*="video_player"][data-react-props]');
+      if (wrapper) {
+        try { props = JSON.parse(wrapper.getAttribute('data-react-props')); } catch (_) { props = null; }
+      }
+      const config = window.presentationConfig || {};
+      const isVideo = config.documentType === VIDEO_TYPE ||
+        (props && props.documentType === VIDEO_TYPE) ||
+        !!document.querySelector('video.vjs-tech');
+      if (!isVideo) return null;
+      let playlistUrl = (props && props.videoUrl) || null;
+      if (!playlistUrl) {
+        const m = document.documentElement.outerHTML.match(/https:\/\/[^"'\s&<>]+\/hls_master_playlist\/[^"'\s&<>]+\.m3u8/);
+        if (m) playlistUrl = m[0];
+      }
+      const titleEl = document.querySelector('.video-title');
+      const title = (props && props.videoTitle) ||
+        (titleEl && titleEl.textContent.trim()) ||
+        document.title.replace(/\s*[-|]\s*DocSend\s*$/i, '').trim() ||
+        null;
+      return { title, playlistUrl, thumbUrl: (props && props.thumbPath) || null };
+    });
+  } catch (e) {
+    console.log('Video detection failed:', e.message);
+    return null;
+  }
+}
+
+/**
  * Everything that happens on a classic viewer page after navigation: the
  * email / passcode gates, the email-verification wall, the CCPA banner, then
  * the page capture (with a full-page screenshot as a last resort). Returns the
- * screenshot buffers. parkOnVerificationWall: throw EmailVerificationRequired
+ * screenshot buffers, or for a video document { video: true, title,
+ * playlistUrl, thumbUrl } (the signed HLS playlist, see video.js) instead of
+ * any capture. parkOnVerificationWall: throw EmailVerificationRequired
  * at the wall (first attempt) instead of a plain error (resume attempt, or a
  * document inside a dataroom whose link has already been used).
  */
@@ -1005,6 +1045,18 @@ async function captureLoadedDocument(page, {
     console.log(`Email verification required; DocSend emailed a link to ${email}`);
     const sessionCookies = await page.cookies().catch(() => []);
     throw new EmailVerificationRequired(email, sessionCookies);
+  }
+
+  // A video has no pages to capture: hand the caller its playlist so the MP4
+  // can be downloaded (the player would only ever screenshot as a cover frame).
+  const video = await detectVideoDocument(page);
+  if (video) {
+    await onCheckpoint('video-detected', { page, extra: video });
+    if (video.playlistUrl) {
+      console.log(`Video document "${video.title}" detected; returning its HLS playlist instead of page captures`);
+      return { video: true, title: video.title, playlistUrl: video.playlistUrl, thumbUrl: video.thumbUrl };
+    }
+    console.log('Video document without a playlist URL; capturing its cover frame instead');
   }
 
   console.log('Hiding cookie banners and overlays...');
@@ -1376,9 +1428,24 @@ async function convertDataroom(browser, rootPage, {
       }
       docPage = await openViewerPage(browser);
       await docPage.goto(doc.url, { waitUntil: 'networkidle0', timeout: 120000 });
-      const screenshots = await captureLoadedDocument(docPage, {
+      const captured = await captureLoadedDocument(docPage, {
         messageText, email, onCheckpoint: docCheckpoint, parkOnVerificationWall: false
       });
+      if (captured && captured.video) {
+        console.log(`Dataroom document ${docLabel} is a video; its MP4 is fetched from the playlist`);
+        // The player tab is not needed any more: close it before the download
+        // so Chromium is not buffering the stream next to ffmpeg.
+        await docPage.close().catch(() => {});
+        docPage = null;
+        const converted = {
+          title: doc.title || captured.title, url: doc.url, folder: doc.folder, type: doc.type,
+          video: true, videoTitle: captured.title, playlistUrl: captured.playlistUrl, thumbUrl: captured.thumbUrl
+        };
+        if (onDocument) await onDocument(converted, i, documents.length);
+        results.push(converted);
+        continue;
+      }
+      const screenshots = captured;
       console.log(`Dataroom document ${docLabel} captured: ${screenshots.length} page(s)`);
       const converted = { title: doc.title, url: doc.url, folder: doc.folder, type: doc.type, screenshots };
       if (onDocument) {
@@ -1414,9 +1481,10 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
     verifyUrl = null,
     cookies = null,
     // Datarooms: called with each converted document ({ title, url, folder,
-    // screenshots }) as soon as it is captured, so the caller can build and
-    // post its PDF and let the screenshots go instead of holding every
-    // document's pages in memory until the end.
+    // screenshots }, or { ..., video: true, playlistUrl } for a video) as soon
+    // as it is captured, so the caller can build and post its PDF (or fetch
+    // the MP4 while the signed playlist is fresh) and let the screenshots go
+    // instead of holding every document's pages in memory until the end.
     onDocument = null
   } = opts;
 
@@ -1569,6 +1637,7 @@ module.exports = {
   isDataroomPage,
   enumerateDataroomViaApi,
   captureLoadedDocument,
+  detectVideoDocument,
   openViewerPage,
   createPDFFromScreenshots,
   dismissCookieBanner,

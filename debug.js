@@ -3,6 +3,7 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const { convertDocSendToPDF, createPDFFromScreenshots } = require('./docsend');
+const { downloadVideo } = require('./video');
 
 function usage() {
   console.error(`
@@ -20,6 +21,10 @@ Flags:
                      it with --cookies=PATH to reuse that session)
   --cookies=PATH     cookies.json from the run that hit the verification wall
   --email=ADDRESS    Email to enter instead of DOCSEND_EMAIL
+  --video-out=PATH   For a video document, download its MP4 to PATH (with
+                     several videos in a dataroom: PATH-1.mp4, PATH-2.mp4, ...).
+                     Without it the playlist URL is only printed.
+                     VIDEO_MAX_HEIGHT caps the rendition (default 1080).
 
 Artifacts written per checkpoint:
   NN-<step>.png         Full-page screenshot
@@ -41,6 +46,8 @@ const verifyUrl = verifyUrlArg ? verifyUrlArg.slice('--verify-url='.length) : nu
 const cookiesArg = argv.find(a => a.startsWith('--cookies='));
 const emailArg = argv.find(a => a.startsWith('--email='));
 const emailOverride = emailArg ? emailArg.slice('--email='.length) : undefined;
+const videoOutArg = argv.find(a => a.startsWith('--video-out='));
+const videoOut = videoOutArg ? videoOutArg.slice('--video-out='.length) : null;
 const url = argv.find(a => /^https?:\/\//.test(a));
 if (!url) {
   console.error('ERROR: no URL provided');
@@ -191,6 +198,7 @@ async function onCheckpoint(name, { page, frame, extra } = {}) {
 
   let screenshots;
   let dataroom = null;
+  let videoDoc = null;
   try {
     const result = await convertDocSendToPDF(url, messageText, {
       launchOptions,
@@ -204,8 +212,13 @@ async function onCheckpoint(name, { page, frame, extra } = {}) {
       dataroom = result;
       console.log(`Dataroom "${result.title}": ${result.documents.length} document(s)`);
       result.documents.forEach((d, i) =>
-        console.log(`  ${i + 1}. ${d.folder ? `${d.folder} / ` : ''}${d.title} — ${d.error ? `FAILED: ${d.error}` : `${d.screenshots.length} pages`}`)
+        console.log(`  ${i + 1}. ${d.folder ? `${d.folder} / ` : ''}${d.title} — ${d.error ? `FAILED: ${d.error}` : d.video ? `video (${d.playlistUrl})` : `${d.screenshots.length} pages`}`)
       );
+    } else if (result && result.video) {
+      videoDoc = result;
+      console.log(`Video document "${result.title}"`);
+      console.log(`  playlist: ${result.playlistUrl}`);
+      if (result.thumbUrl) console.log(`  thumbnail: ${result.thumbUrl}`);
     } else {
       screenshots = result;
       console.log(`Captured ${screenshots.length} screenshots`);
@@ -230,14 +243,45 @@ async function onCheckpoint(name, { page, frame, extra } = {}) {
     process.exit(1);
   }
 
+  // Videos: the MP4 is written only when asked for (--video-out), since the
+  // 1080p rendition of a long video is large.
+  async function writeVideo(doc, target) {
+    console.log(`Downloading video "${doc.title}" to ${target}...`);
+    const t0 = Date.now();
+    const video = await downloadVideo(doc.playlistUrl, { outPath: target });
+    console.log(`MP4 written: ${video.path} (${video.name} ${video.width}x${video.height}, ${(video.bytes / 1048576).toFixed(1)} MB, ${Math.round(video.durationSec)} s, took ${((Date.now() - t0) / 1000).toFixed(1)} s)`);
+  }
+  if (videoDoc && videoOut) {
+    try {
+      await writeVideo(videoDoc, videoOut);
+    } catch (e) {
+      console.error(`Video download failed: ${e.message}`);
+    }
+  } else if (videoDoc) {
+    console.log('Pass --video-out=PATH to download the MP4.');
+  }
+
   if (!noPdf && dataroom) {
     fs.writeFileSync(path.join(outDir, 'dataroom.json'), JSON.stringify({
       title: dataroom.title,
-      documents: dataroom.documents.map(d => ({ title: d.title, url: d.url, folder: d.folder, pages: d.screenshots ? d.screenshots.length : 0, error: d.error || null }))
+      documents: dataroom.documents.map(d => ({ title: d.title, url: d.url, folder: d.folder, type: d.type, pages: d.screenshots ? d.screenshots.length : 0, video: !!d.video, playlistUrl: d.playlistUrl || null, error: d.error || null }))
     }, null, 2));
+    const videos = dataroom.documents.filter(d => d.video);
+    for (let v = 0; v < videos.length; v++) {
+      if (!videoOut) {
+        console.log(`Video "${videos[v].title}": pass --video-out=PATH to download the MP4.`);
+        continue;
+      }
+      const target = videos.length === 1 ? videoOut : videoOut.replace(/(\.mp4)?$/i, `-${v + 1}.mp4`);
+      try {
+        await writeVideo(videos[v], target);
+      } catch (e) {
+        console.error(`Video download failed for ${videos[v].title}: ${e.message}`);
+      }
+    }
     for (let i = 0; i < dataroom.documents.length; i++) {
       const d = dataroom.documents[i];
-      if (d.error) continue;
+      if (d.error || d.video) continue;
       const safe = d.title.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').slice(0, 80) || `doc${i + 1}`;
       const pdfPath = path.join(outDir, `output-${String(i + 1).padStart(2, '0')}-${safe}.pdf`);
       try {
@@ -247,7 +291,7 @@ async function onCheckpoint(name, { page, frame, extra } = {}) {
         console.error(`PDF build failed for ${d.title}: ${e.message}`);
       }
     }
-  } else if (!noPdf) {
+  } else if (!noPdf && screenshots) {
     try {
       const pdf = await createPDFFromScreenshots(screenshots);
       const pdfPath = path.join(outDir, 'output.pdf');
