@@ -4,7 +4,7 @@ const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { convertDocSendToPDF, createPDFFromScreenshots } = require('./docsend');
+const { convertDocSendToPDF, createPDFFromScreenshots, MEMORY_SKIP_REASON } = require('./docsend');
 const { convertPitchToPDF } = require('./pitch');
 const { closeSharedBrowser } = require('./browser');
 const { classifyReply } = require('./threadReplies');
@@ -197,6 +197,13 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
       }).catch(console.error);
       return;
     }
+    if (doc.skipped) {
+      await app.client.chat.postMessage({
+        channel, thread_ts: threadTs,
+        text: `${index + 1}/${total}: *${doc.title}*${doc.folder ? ` (${doc.folder})` : ''} skipped: ${doc.error}. Open it directly: ${doc.url}`
+      }).catch(console.error);
+      return;
+    }
     console.log(`Dataroom document ${index + 1}/${total} "${doc.title}": ${doc.screenshots.length} pages, creating PDF...`);
     const pdfBuffer = await createPDFFromScreenshots(doc.screenshots);
     console.log('PDF buffer size:', pdfBuffer.length, 'bytes');
@@ -213,13 +220,18 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
       if (result && result.dataroom) {
         const webLinks = result.documents.filter(d => d.webLink);
         const converted = result.documents.filter(d => !d.error && !d.webLink);
-        const failed = result.documents.filter(d => d.error);
-        console.log(`Dataroom "${result.title}": ${converted.length} converted, ${failed.length} failed, ${webLinks.length} web links`);
+        const skipped = result.documents.filter(d => d.skipped);
+        const failed = result.documents.filter(d => d.error && !d.skipped);
+        console.log(`Dataroom "${result.title}": ${converted.length} converted, ${failed.length} failed, ${skipped.length} skipped, ${webLinks.length} web links`);
         const lines = [
           `Converted ${converted.length} of ${result.documents.length} entr${result.documents.length === 1 ? 'y' : 'ies'} from the DocSend dataroom *${result.title}*.`
         ];
         if (webLinks.length > 0) {
           lines.push(`${webLinks.length} web link${webLinks.length === 1 ? '' : 's'} passed through as-is (see above).`);
+        }
+        if (skipped.length > 0) {
+          lines.push(`Skipped ${skipped.length} (${MEMORY_SKIP_REASON}; open ${skipped.length === 1 ? 'it' : 'them'} in DocSend directly):`);
+          skipped.forEach(d => lines.push(`• ${d.folder ? `${d.folder} / ` : ''}${d.title}: ${d.url}`));
         }
         if (failed.length > 0) {
           lines.push(`Couldn't convert ${failed.length}:`);
@@ -297,6 +309,15 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
             `Reply here in this thread with just the passcode and I'll continue. You have 30 minutes.`,
             `(Next time you can include it with the link as \`pw:THEPASSCODE\`.)`
           ].join('\n')
+        }).catch(console.error);
+        return;
+      }
+
+      if (error.code === 'CAPTURE_ABORTED') {
+        console.error(`Conversion of ${docUrl} aborted: ${error.reason}`);
+        await app.client.chat.postMessage({
+          channel, thread_ts: threadTs,
+          text: `I had to stop converting this ${provider} document: it is ${MEMORY_SKIP_REASON} (${error.reason}). Please open it in DocSend directly.`
         }).catch(console.error);
         return;
       }

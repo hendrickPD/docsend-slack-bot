@@ -1,8 +1,32 @@
 const puppeteer = require('puppeteer');
 const { PDFDocument } = require('pdf-lib');
-const { DEFAULT_LAUNCH_ARGS, getSharedBrowser } = require('./browser');
+const { DEFAULT_LAUNCH_ARGS, getSharedBrowser, closeSharedBrowser } = require('./browser');
+const memory = require('./memory');
 
 const noop = async () => {};
+
+/**
+ * A capture was stopped on purpose (memory pressure): the pages captured so
+ * far are dropped and the caller decides what to tell the user.
+ */
+class CaptureAborted extends Error {
+  constructor(reason) {
+    super(`Capture aborted: ${reason}`);
+    this.name = 'CaptureAborted';
+    this.code = 'CAPTURE_ABORTED';
+    this.reason = reason;
+  }
+}
+
+// Shared between the memory watchdog (which sets it) and the capture loops
+// (which check it between pages and before each screenshot).
+class AbortFlag {
+  constructor() { this.reason = null; }
+  get aborted() { return this.reason !== null; }
+  abort(reason) { if (this.reason === null) this.reason = reason || 'aborted'; }
+  reset() { this.reason = null; }
+  check() { if (this.reason !== null) throw new CaptureAborted(this.reason); }
+}
 
 // A full-page screenshot of a long page (a web link rendered in the viewer, a
 // tall vertical document that didn't take the per-image path) is one bitmap
@@ -10,7 +34,8 @@ const noop = async () => {};
 // process. Capture at most MAX_FALLBACK_HEIGHT px of it.
 const MAX_FALLBACK_HEIGHT = 4320;
 
-async function boundedFullPageScreenshot(page) {
+async function boundedFullPageScreenshot(page, abort = new AbortFlag()) {
+  abort.check();
   const { width, height } = await page.evaluate(() => ({
     width: document.documentElement.clientWidth || window.innerWidth,
     height: Math.max(
@@ -139,7 +164,7 @@ async function detectEmailVerificationWall(page) {
  * with data-pagenum. ArrowRight does nothing useful here, so we iterate the
  * image elements directly and screenshot each one at its natural resolution.
  */
-async function captureVerticalPages(page, { onCheckpoint = noop } = {}) {
+async function captureVerticalPages(page, { onCheckpoint = noop, abort = new AbortFlag() } = {}) {
   console.log('Capturing vertical document pages (per-image strategy)...');
   // Hide UI chrome + cookie banner so nothing overlays the page images
   await page.evaluate(() => {
@@ -166,6 +191,7 @@ async function captureVerticalPages(page, { onCheckpoint = noop } = {}) {
 
   const screenshots = [];
   for (let i = 0; i < handles.length; i++) {
+    abort.check();
     const img = handles[i];
 
     // Scroll the image into view FIRST — vertical docs lazy-load page images,
@@ -198,6 +224,7 @@ async function captureVerticalPages(page, { onCheckpoint = noop } = {}) {
     // network request, so it can't hit expired signed URLs, and it yields the
     // natural-resolution image. Requires --disable-web-security (canvas taint).
     if (info.naturalWidth > 0) {
+      abort.check();
       try {
         const dataUrl = await img.evaluate(el => {
           const canvas = document.createElement('canvas');
@@ -216,6 +243,7 @@ async function captureVerticalPages(page, { onCheckpoint = noop } = {}) {
     // Strategy 2: fetch the image bytes from its URL in the browser context
     // (session cookies carry).
     if (!shot) {
+      abort.check();
       try {
         const bytes = await page.evaluate(async (url) => {
           const resp = await fetch(url, { credentials: 'include' });
@@ -235,6 +263,7 @@ async function captureVerticalPages(page, { onCheckpoint = noop } = {}) {
     // screenshotting past it (this is what produced half-black PDF pages), so
     // never capture beyond the viewport — make the viewport big enough instead.
     if (!shot) {
+      abort.check();
       const rect = await img.evaluate(el => {
         const r = el.getBoundingClientRect();
         return { width: Math.ceil(r.width), height: Math.ceil(r.height) };
@@ -272,7 +301,8 @@ async function captureVerticalPages(page, { onCheckpoint = noop } = {}) {
  * before the slide has painted. Returns a Buffer, or null when no slide <img> is
  * present so the caller can fall back to a full-page screenshot.
  */
-async function captureSlideImage(page, pageNum) {
+async function captureSlideImage(page, pageNum, { abort = new AbortFlag() } = {}) {
+  abort.check();
   const handle = await page.evaluateHandle((pn) => {
     const imgs = Array.from(document.querySelectorAll('img.preso-view.page-view'));
     if (imgs.length === 0) return null;
@@ -321,6 +351,7 @@ async function captureSlideImage(page, pageNum) {
     // network request (can't hit expired signed URLs) and yields natural
     // resolution. Requires --disable-web-security for the cross-origin read.
     if (info.naturalWidth > 0) {
+      abort.check();
       try {
         const dataUrl = await img.evaluate(el => {
           const canvas = document.createElement('canvas');
@@ -340,6 +371,7 @@ async function captureSlideImage(page, pageNum) {
     // Strategy 2: fetch the image bytes from its URL in the page context
     // (session cookies carry).
     if (info.src) {
+      abort.check();
       try {
         const bytes = await page.evaluate(async (url) => {
           const resp = await fetch(url, { credentials: 'include' });
@@ -355,6 +387,7 @@ async function captureSlideImage(page, pageNum) {
     }
 
     // Strategy 3: element screenshot of the slide image itself.
+    abort.check();
     try {
       const shot = await img.screenshot({ type: 'jpeg', quality: 80 });
       console.log(`  element screenshot: ${shot.length} bytes`);
@@ -390,7 +423,7 @@ async function findSpreadsheetFrame(page) {
 const SPREADSHEET_MAX_WIDTH = 4400;
 const SPREADSHEET_MAX_HEIGHT = 8000;
 
-async function captureSpreadsheetPages(page, frame, { onCheckpoint = noop } = {}) {
+async function captureSpreadsheetPages(page, frame, { onCheckpoint = noop, abort = new AbortFlag() } = {}) {
   const tabCount = await frame.$$eval('a.tabstrip-link', els => els.length).catch(() => 0);
   console.log(`Spreadsheet preview detected with ${tabCount} sheet tab(s)`);
 
@@ -418,6 +451,7 @@ async function captureSpreadsheetPages(page, frame, { onCheckpoint = noop } = {}
   const screenshots = [];
   const sheetCount = Math.max(tabCount, 1);
   for (let i = 0; i < sheetCount; i++) {
+    abort.check();
     if (tabCount > 0) {
       const label = await frame.evaluate((idx) => {
         const link = document.getElementById(`tabstrip-link-${idx}`);
@@ -495,16 +529,19 @@ async function captureSpreadsheetPages(page, frame, { onCheckpoint = noop } = {}
     };
     // Discard the first capture after the viewport change: Chromium's first
     // rasterization at the new size can come back solid black.
+    abort.check();
     await page.screenshot({ type: 'jpeg', quality: 30, clip });
     // And occasionally the buffer itself is corrupt; retry once, then skip the
     // sheet rather than poison the whole PDF (createPDFFromScreenshots throws
     // on an invalid image).
     const isValidImage = b => Buffer.isBuffer(b) && b.length > 4 &&
       ((b[0] === 0xFF && b[1] === 0xD8) || (b[0] === 0x89 && b[1] === 0x50));
+    abort.check();
     let shot = await page.screenshot({ type: 'jpeg', quality: 80, clip });
     if (!isValidImage(shot)) {
       console.log('  screenshot buffer invalid; retrying once');
       await page.waitForTimeout(500);
+      abort.check();
       shot = await page.screenshot({ type: 'jpeg', quality: 80, clip });
     }
     if (isValidImage(shot)) {
@@ -520,7 +557,8 @@ async function captureSpreadsheetPages(page, frame, { onCheckpoint = noop } = {}
   return screenshots;
 }
 
-async function capturePages(page, { onCheckpoint = noop } = {}) {
+async function capturePages(page, { onCheckpoint = noop, abort = new AbortFlag() } = {}) {
+  abort.check();
   // Branch for vertical DocSend docs — body.vertical is set on portrait/long-form docs
   // where ArrowRight navigation doesn't work and the landscape viewport clips content.
   // Kill switch: set VERTICAL_CAPTURE_LEGACY=1 to force old behavior.
@@ -529,7 +567,7 @@ async function capturePages(page, { onCheckpoint = noop } = {}) {
   );
   if (isVertical && process.env.VERTICAL_CAPTURE_LEGACY !== '1') {
     console.log('Detected vertical DocSend doc');
-    return captureVerticalPages(page, { onCheckpoint });
+    return captureVerticalPages(page, { onCheckpoint, abort });
   }
 
   // Branch for spreadsheets, which render sheet tables in a previews iframe —
@@ -538,7 +576,7 @@ async function capturePages(page, { onCheckpoint = noop } = {}) {
   if (process.env.SPREADSHEET_CAPTURE_LEGACY !== '1') {
     const spreadsheetFrame = await findSpreadsheetFrame(page);
     if (spreadsheetFrame) {
-      return captureSpreadsheetPages(page, spreadsheetFrame, { onCheckpoint });
+      return captureSpreadsheetPages(page, spreadsheetFrame, { onCheckpoint, abort });
     }
   }
 
@@ -581,6 +619,7 @@ async function capturePages(page, { onCheckpoint = noop } = {}) {
   let lastPage = null;
   let pageNum = 1;
   while (true) {
+    abort.check();
     const current = await page.evaluate(() => {
       const el = document.querySelector('span[aria-label="page number"]');
       return el ? parseInt(el.textContent, 10) : null;
@@ -591,9 +630,9 @@ async function capturePages(page, { onCheckpoint = noop } = {}) {
     // screenshot goes white if the slide image hasn't painted yet, which is what
     // produced blank PDF pages. Fall back to a full-page shot only if no slide
     // image is present.
-    let shot = await captureSlideImage(page, current);
+    let shot = await captureSlideImage(page, current, { abort });
     if (!shot) {
-      shot = await boundedFullPageScreenshot(page);
+      shot = await boundedFullPageScreenshot(page, abort);
       console.log(`  full-page screenshot fallback: ${shot.length} bytes`);
     }
 
@@ -670,7 +709,8 @@ async function captureLoadedDocument(page, {
   messageText = '',
   email = process.env.DOCSEND_EMAIL,
   onCheckpoint = noop,
-  parkOnVerificationWall = true
+  parkOnVerificationWall = true,
+  abort = new AbortFlag()
 } = {}) {
   console.log('Waiting for document to be fully loaded...');
   await page.waitForFunction(() => {
@@ -1066,9 +1106,15 @@ async function captureLoadedDocument(page, {
   await onCheckpoint('after-ccpa', { page, extra: { cookieBannerFound } });
 
   console.log('Proceeding to capture document pages');
+  abort.check();
   try {
-    return await capturePages(page, { onCheckpoint });
+    return await capturePages(page, { onCheckpoint, abort });
   } catch (captureError) {
+    // An abort is deliberate: no fallback screenshot, the caller handles it.
+    if (captureError.code === 'CAPTURE_ABORTED' || abort.aborted) {
+      abort.check();
+      throw captureError;
+    }
     console.error('Error in capturePages:', captureError);
     await onCheckpoint('capture-error', { page, extra: { message: captureError.message } });
 
@@ -1087,7 +1133,7 @@ async function captureLoadedDocument(page, {
       await dismissCookieBanner(page);
 
       console.log('Taking fallback screenshot');
-      const fallbackShot = await boundedFullPageScreenshot(page);
+      const fallbackShot = await boundedFullPageScreenshot(page, abort);
       return [fallbackShot];
     } catch (fallbackError) {
       console.error('Fallback screenshot also failed:', fallbackError);
@@ -1302,14 +1348,26 @@ async function enumerateDataroomViaDom(page) {
   return { title, documents };
 }
 
-async function convertDataroom(browser, rootPage, {
+const MEMORY_SKIP_REASON = "too large for this instance's memory";
+
+async function convertDataroom(initialBrowser, rootPage, {
   url,
   messageText = '',
   email = process.env.DOCSEND_EMAIL,
   onCheckpoint = noop,
   verifyUrl = null,
-  onDocument = null
+  onDocument = null,
+  // Resume after a restart: documents before startIndex were already posted.
+  startIndex = 0,
+  // Called once the session is authorized, with the cookies that re-enter
+  // it (the restart state keeps them).
+  onSession = null,
+  abort = new AbortFlag(),
+  watchdog = null,
+  // Closes the current browser and returns a fresh one (memory pressure).
+  relaunchBrowser = null
 }) {
+  let browser = initialBrowser;
   const spaceId = (rootPage.url().match(/\/view\/s\/([^/?#]+)/) || url.match(/\/view\/(?:s\/)?([^/?#]+)/) || [])[1];
   const passwordMatch = messageText.match(/pw:([^\s]+)/i);
   const docsendPassword = passwordMatch ? passwordMatch[1] : null;
@@ -1351,16 +1409,42 @@ async function convertDataroom(browser, rootPage, {
   if (documents.length === 0) {
     throw new Error('No documents found in the dataroom');
   }
+  if (startIndex > 0) {
+    console.log(`Resuming the dataroom at document ${Math.min(startIndex, documents.length) + 1}/${documents.length}`);
+  }
 
-  // The documents open in their own tabs (same browser context, so the
-  // authorized session cookies carry); the index page is not needed any more.
+  // The authorized session's cookies: every document tab starts from them,
+  // which is what lets a relaunched browser (memory pressure) or a restarted
+  // bot (crash resume) carry on without another email gate.
+  let sessionCookies = await rootPage.cookies().catch(() => []);
+  if (onSession) await onSession(sessionCookies);
+
+  // The documents open in their own tabs; the index page is not needed any more.
   await rootPage.close().catch(() => {});
+
+  const reclaimMemory = async (why) => {
+    if (!relaunchBrowser) return;
+    console.log(`Memory pressure ${why}; closing and relaunching the browser`);
+    browser = await relaunchBrowser();
+    abort.reset();
+    if (watchdog) watchdog.rearm();
+  };
 
   const results = [];
   for (let i = 0; i < documents.length; i++) {
     const doc = documents[i];
     const docLabel = `${i + 1}/${documents.length}`;
+    const base = { title: doc.title, url: doc.url, folder: doc.folder, type: doc.type };
+    if (i < startIndex) {
+      results.push({ ...base, resumed: true, pages: null });
+      continue;
+    }
+    // Pressure that hit between documents (while the previous PDF was being
+    // built and uploaded): start the next one from a fresh browser.
+    if (abort.aborted) await reclaimMemory('between documents');
+
     console.log(`Converting dataroom document ${docLabel}: ${doc.title} (${doc.url})`);
+    memory.logUsage(`before document ${docLabel}`);
     const docCheckpoint = (name, args) => onCheckpoint(`doc${i + 1}-${name}`, args);
     let docPage = null;
     try {
@@ -1369,36 +1453,57 @@ async function convertDataroom(browser, rootPage, {
       // the result was never a useful PDF. Hand the link through instead.
       if (doc.type === 'WEB_LINK') {
         console.log(`Dataroom document ${docLabel} is a web link; passing it through without rendering`);
-        const linkEntry = { title: doc.title, url: doc.url, folder: doc.folder, type: doc.type, webLink: true, screenshots: [] };
+        const linkEntry = { ...base, webLink: true, screenshots: [] };
         if (onDocument) await onDocument(linkEntry, i, documents.length);
-        results.push({ title: doc.title, url: doc.url, folder: doc.folder, type: doc.type, webLink: true, pages: 0 });
+        results.push({ ...base, webLink: true, pages: 0 });
         continue;
       }
-      docPage = await openViewerPage(browser);
+      docPage = await openViewerPage(browser, { cookies: sessionCookies });
+      abort.check();
       await docPage.goto(doc.url, { waitUntil: 'networkidle0', timeout: 120000 });
       const screenshots = await captureLoadedDocument(docPage, {
-        messageText, email, onCheckpoint: docCheckpoint, parkOnVerificationWall: false
+        messageText, email, onCheckpoint: docCheckpoint, parkOnVerificationWall: false, abort
       });
       console.log(`Dataroom document ${docLabel} captured: ${screenshots.length} page(s)`);
-      const converted = { title: doc.title, url: doc.url, folder: doc.folder, type: doc.type, screenshots };
+      sessionCookies = await docPage.cookies().catch(() => sessionCookies);
+      await docPage.close().catch(() => {});
+      docPage = null;
+      const converted = { ...base, screenshots };
       if (onDocument) {
         await onDocument(converted, i, documents.length);
         // Drop the page buffers once the caller has handled them.
-        results.push({ title: doc.title, url: doc.url, folder: doc.folder, type: doc.type, pages: screenshots.length });
+        results.push({ ...base, pages: screenshots.length });
       } else {
         results.push(converted);
       }
     } catch (docError) {
-      console.error(`Failed to convert dataroom document ${docLabel} (${doc.title}):`, docError.message);
-      results.push({ title: doc.title, url: doc.url, folder: doc.folder, type: doc.type, error: docError.message });
+      if (abort.aborted || docError.code === 'CAPTURE_ABORTED') {
+        // The document is what pushed the instance to its limit: give it up,
+        // get the memory back, and carry on with the rest of the room.
+        console.error(`Skipping dataroom document ${docLabel} (${doc.title}): ${abort.reason || docError.message}`);
+        if (docPage) await docPage.close().catch(() => {});
+        docPage = null;
+        await reclaimMemory(`while converting document ${docLabel}`);
+        const skipped = { ...base, skipped: true, error: MEMORY_SKIP_REASON };
+        results.push(skipped);
+        if (onDocument) {
+          await onDocument({ ...skipped, screenshots: [] }, i, documents.length).catch(e =>
+            console.error('Could not report the skipped document:', e.message));
+        }
+      } else {
+        console.error(`Failed to convert dataroom document ${docLabel} (${doc.title}):`, docError.message);
+        results.push({ ...base, error: docError.message });
+      }
     } finally {
       // One document tab at a time: the instance has 512MB.
       if (docPage) await docPage.close().catch(() => {});
+      memory.logUsage(`after document ${docLabel}`);
     }
   }
 
-  const failed = results.filter(r => r.error).length;
-  console.log(`Dataroom "${title}" done: ${results.length - failed} converted, ${failed} failed`);
+  const failed = results.filter(r => r.error && !r.skipped).length;
+  const skipped = results.filter(r => r.skipped).length;
+  console.log(`Dataroom "${title}" done: ${results.length - failed - skipped} converted, ${failed} failed, ${skipped} skipped for memory`);
   return { dataroom: true, title, url, spaceId, documents: results };
 }
 
@@ -1416,8 +1521,14 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
     // Datarooms: called with each converted document ({ title, url, folder,
     // screenshots }) as soon as it is captured, so the caller can build and
     // post its PDF and let the screenshots go instead of holding every
-    // document's pages in memory until the end.
-    onDocument = null
+    // document's pages in memory until the end. A document skipped under
+    // memory pressure arrives with skipped: true and no screenshots.
+    onDocument = null,
+    // Datarooms: skip the first startIndex documents (already posted before
+    // a restart) and report the authorized session's cookies through
+    // onSession(cookies) so the caller can persist them.
+    startIndex = 0,
+    onSession = null
   } = opts;
 
   console.log('Starting document capture for:', url);
@@ -1426,12 +1537,30 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
   // Explicit launchOptions (the debug harness: headful, devtools, slowMo) get
   // a dedicated browser; production conversions share one across the queue.
   const dedicated = Object.keys(launchOptions).length > 0;
+  const launch = () => dedicated
+    ? puppeteer.launch({ headless: 'new', args: DEFAULT_LAUNCH_ARGS, ...launchOptions })
+    : getSharedBrowser();
   let browser;
   let page;
+
+  // The memory watchdog flags the capture; the loops stop at the next check.
+  const abort = new AbortFlag();
+  const watchdog = memory.watch(({ usage, limit }) =>
+    abort.abort(`memory pressure: ${memory.formatMB(usage)} of ${memory.formatMB(limit)} in use`));
+  const relaunchBrowser = async () => {
+    if (dedicated) {
+      if (browser) await browser.close().catch(() => {});
+    } else {
+      await closeSharedBrowser();
+    }
+    browser = await launch();
+    memory.logUsage('after browser relaunch');
+    return browser;
+  };
+
   try {
-    browser = dedicated
-      ? await puppeteer.launch({ headless: 'new', args: DEFAULT_LAUNCH_ARGS, ...launchOptions })
-      : await getSharedBrowser();
+    memory.logUsage('at job start');
+    browser = await launch();
     page = await openViewerPage(browser, { cookies });
 
     if (verifyUrl) {
@@ -1463,17 +1592,30 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
 
     if (await isDataroomPage(page)) {
       console.log('DocSend dataroom detected at', page.url());
-      return await convertDataroom(browser, page, {
-        url, messageText, email, onCheckpoint, verifyUrl, onDocument
+      const room = await convertDataroom(browser, page, {
+        url, messageText, email, onCheckpoint, verifyUrl, onDocument,
+        startIndex, onSession, abort, watchdog, relaunchBrowser
       });
+      memory.logUsage('at job end');
+      return room;
     }
 
-    return await captureLoadedDocument(page, {
-      messageText, email, onCheckpoint, parkOnVerificationWall: !verifyUrl
+    const screenshots = await captureLoadedDocument(page, {
+      messageText, email, onCheckpoint, parkOnVerificationWall: !verifyUrl, abort
     });
+    memory.logUsage('at job end');
+    return screenshots;
   } catch (error) {
     if (['EMAIL_VERIFICATION_REQUIRED', 'PASSCODE_REQUIRED', 'EMAIL_REQUIRED'].includes(error.code)) {
       throw error;
+    }
+    if (abort.aborted || error.code === 'CAPTURE_ABORTED') {
+      // Give the memory back before the next queued job starts.
+      const aborted = error.code === 'CAPTURE_ABORTED' ? error : new CaptureAborted(abort.reason);
+      console.error(`Capture aborted: ${aborted.reason}`);
+      memory.logUsage('at abort');
+      if (!dedicated) await closeSharedBrowser();
+      throw aborted;
     }
     console.error('Error capturing document:', error);
     if (page) {
@@ -1487,9 +1629,10 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
     }
     throw error;
   } finally {
+    watchdog.stop();
     if (!keepOpenOnError) {
       if (dedicated && browser) {
-        await browser.close();
+        await browser.close().catch(() => {});
       } else if (page) {
         await page.close().catch(() => {});
       }
@@ -1564,6 +1707,9 @@ module.exports = {
   EmailVerificationRequired,
   EmailRequired,
   PasscodeRequired,
+  CaptureAborted,
+  AbortFlag,
+  MEMORY_SKIP_REASON,
   convertDocSendToPDF,
   convertDataroom,
   isDataroomPage,
