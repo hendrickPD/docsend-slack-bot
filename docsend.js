@@ -47,6 +47,26 @@ class PasscodeRequired extends Error {
   }
 }
 
+/**
+ * The link asks for an email and the caller gave none (opts.email null:
+ * the poster's address could not be read from Slack). Ask instead of
+ * entering a shared address on their behalf.
+ */
+class EmailRequired extends Error {
+  constructor(cookies) {
+    super('This DocSend link asks for an email address');
+    this.name = 'EmailRequired';
+    this.code = 'EMAIL_REQUIRED';
+    this.cookies = cookies;
+  }
+}
+
+async function requireEmail(page, email) {
+  if (email) return;
+  console.log('Email gate detected but no email is known; asking the caller for one');
+  throw new EmailRequired(await page.cookies().catch(() => []));
+}
+
 // A visible passcode field on the page or in any frame.
 async function detectPasscodeGate(page) {
   const probe = ctx => ctx.evaluate(() => {
@@ -645,6 +665,7 @@ async function captureLoadedDocument(page, {
     await onCheckpoint('email-iframe-detected', { page, frame: loginFrame });
     console.log('Email login iframe detected; entering DOCSEND_EMAIL');
     await loginFrame.waitForSelector('input[type="email"]', { timeout: 60000 });
+    await requireEmail(page, email);
     // DocSend prefills the field from a remembered session; typing on top of
     // that produces "a@b.coma@b.com" and a failed submit.
     await loginFrame.$eval('input[type="email"]', el => { el.value = ''; }).catch(() => {});
@@ -743,6 +764,7 @@ async function captureLoadedDocument(page, {
     await onCheckpoint('email-inline-detected', { page });
     console.log('Email login detected; entering DOCSEND_EMAIL');
     await page.waitForSelector('input[type="email"], input[name="email"]', { timeout: 60000 });
+    await requireEmail(page, email);
     await page.$eval('input[type="email"], input[name="email"]', el => { el.value = ''; }).catch(() => {});
     await page.type('input[type="email"], input[name="email"]', email);
     console.log('Entered email in form');
@@ -1080,7 +1102,8 @@ async function passDataroomEmailGate(page, { email, docsendPassword, onCheckpoin
     return false;
   }
   await onCheckpoint('dataroom-email-form', { page });
-  console.log('Dataroom email form detected; entering DOCSEND_EMAIL');
+  await requireEmail(page, email);
+  console.log('Dataroom email form detected; entering email');
   await emailField.evaluate(el => { el.value = ''; }).catch(() => {});
   await emailField.type(email);
 
@@ -1414,7 +1437,7 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
       messageText, email, onCheckpoint, parkOnVerificationWall: !verifyUrl
     });
   } catch (error) {
-    if (error.code === 'EMAIL_VERIFICATION_REQUIRED' || error.code === 'PASSCODE_REQUIRED') {
+    if (['EMAIL_VERIFICATION_REQUIRED', 'PASSCODE_REQUIRED', 'EMAIL_REQUIRED'].includes(error.code)) {
       throw error;
     }
     console.error('Error capturing document:', error);
@@ -1504,6 +1527,7 @@ async function createPDFFromScreenshots(screenshots) {
 
 module.exports = {
   EmailVerificationRequired,
+  EmailRequired,
   PasscodeRequired,
   convertDocSendToPDF,
   convertDataroom,

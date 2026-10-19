@@ -31,7 +31,7 @@ This Slack bot automatically converts DocSend links shared in your Slack workspa
      - `groups:history`
      - `im:history`
      - `mpim:history`
-     - `users:read` and `users:read.email` (optional: lets the bot enter the poster's own email at DocSend's email gate, so verification links reach their inbox; without them it uses `DOCSEND_EMAIL`)
+     - `users:read` and `users:read.email` (lets the bot enter the poster's own email at DocSend's email gate, so verification links reach their inbox; without them the bot asks for the email in the thread. `DOCSEND_EMAIL` is only used by `debug.js`)
    - Install the app to your workspace
    - Copy the Bot User OAuth Token, Signing Secret, and App Token
 

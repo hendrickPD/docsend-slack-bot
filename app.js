@@ -90,7 +90,7 @@ async function processNextConversion() {
 // Conversions parked on something only a person can supply: the DocSend
 // verification link, a passcode, or a different email address. Keyed by
 // channel + thread so the next reply in that thread can be matched.
-// kind: 'verify' (waiting for the emailed link) | 'passcode'
+// kind: 'verify' (waiting for the emailed link) | 'passcode' | 'email'
 const pendingPrompts = new Map();
 const PENDING_PROMPT_TTL_MS = 30 * 60 * 1000;
 
@@ -252,6 +252,22 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
             `*:warning: DO NOT OPEN OR CLICK THE LINK IN THAT EMAIL.* It only works once, and I need to be the one who opens it.`,
             `Instead, copy the link from the email and paste it here in this thread. You have 30 minutes; after that, post the DocSend link again for a fresh one.`,
             EMAIL_OVERRIDE_HINT(error.email)
+          ].join('\n')
+        }).catch(console.error);
+        return;
+      }
+
+      if (error.code === 'EMAIL_REQUIRED') {
+        parkConversion('email', {
+          channel, threadTs, provider, convert, docUrl, docId, messageText,
+          cookies: error.cookies, email: null
+        });
+        await app.client.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          text: [
+            `This link asks for an email address, and I couldn't read yours from your Slack profile.`,
+            `Reply here in this thread with the email address the document was shared with (DocSend may send a verification link there, which you'd then paste here unopened). You have 30 minutes.`
           ].join('\n')
         }).catch(console.error);
         return;
@@ -538,9 +554,10 @@ expressApp.post('/slack/events', (req, res) => {
           const posterId = event.user || event.message?.user;
           lookupPosterEmail(posterId).then((posterEmail) => {
             if (posterEmail) console.log(`Using poster's email for DocSend gates: ${posterEmail}`);
+            else console.log('Poster email unknown; the bot will ask in the thread if the link has an email gate');
             runConversion({
               channel: event.channel, threadTs, provider, convert, docUrl, docId, messageText,
-              convertOpts: posterEmail ? { email: posterEmail } : {}
+              convertOpts: { email: posterEmail || null }
             });
           });
         }
