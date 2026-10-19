@@ -138,6 +138,14 @@ async function onCheckpoint(name, { page, frame, extra } = {}) {
     console.log(`  frames dump failed: ${e.message}`);
   }
 
+  // Session cookies at each step, so a run can be resumed or re-entered
+  // (e.g. a verified dataroom session) without a fresh verification email.
+  try {
+    fs.writeFileSync(`${base}.cookies.json`, JSON.stringify(await page.cookies(), null, 2));
+  } catch (e) {
+    console.log(`  cookies dump failed: ${e.message}`);
+  }
+
   const ctx = frame || page;
   const state = await collectState(ctx);
   if (state) {
@@ -179,15 +187,25 @@ async function onCheckpoint(name, { page, frame, extra } = {}) {
   if (executablePath) console.log(`Using Chrome: ${executablePath}`);
 
   let screenshots;
+  let dataroom = null;
   try {
-    screenshots = await convertDocSendToPDF(url, messageText, {
+    const result = await convertDocSendToPDF(url, messageText, {
       launchOptions,
       onCheckpoint,
       keepOpenOnError: keepOpen && !headless,
       verifyUrl,
       cookies,
     });
-    console.log(`Captured ${screenshots.length} screenshots`);
+    if (result && result.dataroom) {
+      dataroom = result;
+      console.log(`Dataroom "${result.title}": ${result.documents.length} document(s)`);
+      result.documents.forEach((d, i) =>
+        console.log(`  ${i + 1}. ${d.folder ? `${d.folder} / ` : ''}${d.title} — ${d.error ? `FAILED: ${d.error}` : `${d.screenshots.length} pages`}`)
+      );
+    } else {
+      screenshots = result;
+      console.log(`Captured ${screenshots.length} screenshots`);
+    }
   } catch (e) {
     if (e.code === 'EMAIL_VERIFICATION_REQUIRED') {
       const cookiesPath = path.join(outDir, 'cookies.json');
@@ -203,7 +221,24 @@ async function onCheckpoint(name, { page, frame, extra } = {}) {
     process.exit(1);
   }
 
-  if (!noPdf) {
+  if (!noPdf && dataroom) {
+    fs.writeFileSync(path.join(outDir, 'dataroom.json'), JSON.stringify({
+      title: dataroom.title,
+      documents: dataroom.documents.map(d => ({ title: d.title, url: d.url, folder: d.folder, pages: d.screenshots ? d.screenshots.length : 0, error: d.error || null }))
+    }, null, 2));
+    for (let i = 0; i < dataroom.documents.length; i++) {
+      const d = dataroom.documents[i];
+      if (d.error) continue;
+      const safe = d.title.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').slice(0, 80) || `doc${i + 1}`;
+      const pdfPath = path.join(outDir, `output-${String(i + 1).padStart(2, '0')}-${safe}.pdf`);
+      try {
+        fs.writeFileSync(pdfPath, await createPDFFromScreenshots(d.screenshots));
+        console.log(`PDF written: ${pdfPath}`);
+      } catch (e) {
+        console.error(`PDF build failed for ${d.title}: ${e.message}`);
+      }
+    }
+  } else if (!noPdf) {
     try {
       const pdf = await createPDFFromScreenshots(screenshots);
       const pdfPath = path.join(outDir, 'output.pdf');

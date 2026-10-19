@@ -126,10 +126,76 @@ function extractDocSendVerificationUrl(text) {
   return null;
 }
 
-// Convert one document and post the result (or the failure) in its thread.
+// Dataroom entries that are not documents still open in the viewer, but the
+// PDF is only a snapshot: say so next to the file.
+function dataroomTypeNote(type) {
+  if (type === 'WEB_LINK') return ' — a web link, so this is a snapshot of that page';
+  if (type === 'PRESENTATION_VIDEO') return ' — a video, so this is its cover frame only';
+  return '';
+}
+
+// Slack rejects some characters in filenames; keep titles readable otherwise.
+function pdfFilename(title, fallback) {
+  const base = String(title || '').replace(/[\\/:*?"<>|\x00-\x1f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+  return `${base || fallback}.pdf`;
+}
+
+async function uploadPdf({ channel, threadTs, pdfBuffer, filename, title, initialComment }) {
+  try {
+    const result = await app.client.files.uploadV2({
+      channel_id: channel,
+      file: pdfBuffer,
+      filename,
+      title,
+      thread_ts: threadTs,
+      initial_comment: initialComment
+    });
+    console.log('PDF uploaded successfully:', {
+      file_id: result.file?.id,
+      permalink: result.file?.permalink,
+      size: result.file?.size
+    });
+  } catch (uploadError) {
+    console.error('Error uploading PDF:', uploadError);
+    throw new Error(`Failed to upload PDF: ${uploadError.message}`);
+  }
+}
+
+// Convert one document (or every document of a dataroom) and post the result
+// (or the failure) in its thread.
 function runConversion({ channel, threadTs, provider, convert, docUrl, docId, messageText, convertOpts = {} }) {
-  enqueueConversion(() => convert(docUrl, messageText, convertOpts)
-    .then(async (screenshots) => {
+  // Dataroom documents are posted one by one as they are captured, so the
+  // pages of a 30-document room never sit in memory together.
+  const onDocument = async (doc, index, total) => {
+    console.log(`Dataroom document ${index + 1}/${total} "${doc.title}": ${doc.screenshots.length} pages, creating PDF...`);
+    const pdfBuffer = await createPDFFromScreenshots(doc.screenshots);
+    console.log('PDF buffer size:', pdfBuffer.length, 'bytes');
+    await uploadPdf({
+      channel, threadTs, pdfBuffer,
+      filename: pdfFilename(doc.title, `${docId}-${index + 1}`),
+      title: doc.title,
+      initialComment: `${index + 1}/${total}: *${doc.title}*${doc.folder ? ` (${doc.folder})` : ''}${dataroomTypeNote(doc.type)}`
+    });
+  };
+
+  enqueueConversion(() => convert(docUrl, messageText, { ...convertOpts, onDocument })
+    .then(async (result) => {
+      if (result && result.dataroom) {
+        const converted = result.documents.filter(d => !d.error);
+        const failed = result.documents.filter(d => d.error);
+        console.log(`Dataroom "${result.title}": ${converted.length} converted, ${failed.length} failed`);
+        const lines = [
+          `Converted ${converted.length} of ${result.documents.length} document${result.documents.length === 1 ? '' : 's'} from the DocSend dataroom *${result.title}*.`
+        ];
+        if (failed.length > 0) {
+          lines.push(`Couldn't convert ${failed.length}:`);
+          failed.forEach(d => lines.push(`• ${d.folder ? `${d.folder} / ` : ''}${d.title}: ${d.error}`));
+        }
+        await app.client.chat.postMessage({ channel, thread_ts: threadTs, text: lines.join('\n') }).catch(console.error);
+        return;
+      }
+
+      const screenshots = result;
       if (!screenshots || !Array.isArray(screenshots)) {
         throw new Error(`No screenshots returned from ${provider} conversion`);
       }
@@ -141,24 +207,12 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
       }
       console.log('PDF buffer size:', pdfBuffer.length, 'bytes');
 
-      try {
-        const result = await app.client.files.uploadV2({
-          channel_id: channel,
-          file: pdfBuffer,
-          filename: `${docId}.pdf`,
-          title: `${provider} Document ${docId}`,
-          thread_ts: threadTs,
-          initial_comment: `Here is your ${provider} document converted to PDF.`
-        });
-        console.log('PDF uploaded successfully:', {
-          file_id: result.file?.id,
-          permalink: result.file?.permalink,
-          size: result.file?.size
-        });
-      } catch (uploadError) {
-        console.error('Error uploading PDF:', uploadError);
-        throw new Error(`Failed to upload PDF: ${uploadError.message}`);
-      }
+      await uploadPdf({
+        channel, threadTs, pdfBuffer,
+        filename: `${docId}.pdf`,
+        title: `${provider} Document ${docId}`,
+        initialComment: `Here is your ${provider} document converted to PDF.`
+      });
     })
     .catch(async (error) => {
       if (error.code === 'EMAIL_VERIFICATION_REQUIRED') {
@@ -184,7 +238,9 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
       console.error(`Error processing ${provider} document:`, error);
       const text = convertOpts.verifyUrl
         ? `Sorry, that verification link didn't unlock the ${provider} document. It has probably expired or was already clicked, since each link works once. Post the DocSend link again, then paste the new link from the newest email without opening it.`
-        : `Sorry, I couldn't convert the ${provider} document. It might require special access or have security restrictions.`;
+        : /\/view\/s\//.test(docUrl)
+          ? `Sorry, I couldn't convert the DocSend dataroom: ${error.message}`
+          : `Sorry, I couldn't convert the ${provider} document. It might require special access or have security restrictions.`;
       await app.client.chat.postMessage({ channel, thread_ts: threadTs, text }).catch(console.error);
     }));
 }
@@ -366,12 +422,17 @@ expressApp.post('/slack/events', (req, res) => {
 
           // Extract document ID from URL (last path segment; for DocSend the
           // segment after /view/ or /v/, for Pitch the deck slug)
-          const docId = docsendUrl
-            ? (docsendUrl.includes('/view/')
-                ? docsendUrl.split('/view/')[1].split('/')[0]
-                : docsendUrl.split('/v/')[1].split('/')[0])
-            : pitchUrl.split('/').filter(Boolean).pop();
-          console.log('Extracted document ID:', docId);
+          // Dataroom roots (/view/s/<space>) use the space id, not "s".
+          const dataroomMatch = docsendUrl && docsendUrl.match(/\/view\/s\/([a-zA-Z0-9\-_]+)/);
+          const isDataroom = !!dataroomMatch;
+          const docId = dataroomMatch
+            ? dataroomMatch[1]
+            : docsendUrl
+              ? (docsendUrl.includes('/view/')
+                  ? docsendUrl.split('/view/')[1].split('/')[0]
+                  : docsendUrl.split('/v/')[1].split('/')[0])
+              : pitchUrl.split('/').filter(Boolean).pop();
+          console.log('Extracted document ID:', docId, isDataroom ? '(dataroom)' : '');
 
           // Create a unique key for this message
           const messageKey = `${messageId}_${docUrl}`;
@@ -393,7 +454,9 @@ expressApp.post('/slack/events', (req, res) => {
             channel: event.channel,
             text: queueAhead > 0
               ? `Queued ${provider} conversion (${queueAhead} ahead of it)...`
-              : `Converting ${provider} document to PDF...`,
+              : isDataroom
+                ? 'Converting every document in the DocSend dataroom to PDF...'
+                : `Converting ${provider} document to PDF...`,
             thread_ts: threadTs
           }).catch(console.error);
 
