@@ -8,6 +8,7 @@ const { convertDocSendToPDF, createPDFFromScreenshots, MEMORY_SKIP_REASON } = re
 const { convertPitchToPDF } = require('./pitch');
 const { closeSharedBrowser } = require('./browser');
 const { classifyReply } = require('./threadReplies');
+const jobState = require('./jobState');
 
 // Full request/event/signature logging is only useful when debugging; the
 // always-on version buried real log lines under health checks firing every 5s.
@@ -185,8 +186,18 @@ async function uploadPdf({ channel, threadTs, pdfBuffer, filename, title, initia
 }
 
 // Convert one document (or every document of a dataroom) and post the result
-// (or the failure) in its thread.
-function runConversion({ channel, threadTs, provider, convert, docUrl, docId, messageText, convertOpts = {} }) {
+// (or the failure) in its thread. resume: the stored state of a job a
+// restart cut off (see jobState.js); the dataroom continues at its nextIndex.
+function runConversion({ channel, threadTs, provider, convert, docUrl, docId, messageText, convertOpts = {}, resume = null }) {
+  // The job's restart record: posted now, updated after every document,
+  // deleted when the job ends.
+  const job = jobState.trackJob(jobStore, {
+    channel, threadTs, provider, docUrl, docId, messageText,
+    email: convertOpts.email || null,
+    cookies: convertOpts.cookies || null
+  }, { resume });
+  const startIndex = resume ? (resume.state.nextIndex || 0) : 0;
+
   // Dataroom documents are posted one by one as they are captured, so the
   // pages of a 30-document room never sit in memory together.
   const onDocument = async (doc, index, total) => {
@@ -195,6 +206,7 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
         channel, thread_ts: threadTs,
         text: `${index + 1}/${total}: *${doc.title}*${doc.folder ? ` (${doc.folder})` : ''} is a web link, not a document: ${doc.url}`
       }).catch(console.error);
+      await job.documentPosted(index, total);
       return;
     }
     if (doc.skipped) {
@@ -202,6 +214,7 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
         channel, thread_ts: threadTs,
         text: `${index + 1}/${total}: *${doc.title}*${doc.folder ? ` (${doc.folder})` : ''} skipped: ${doc.error}. Open it directly: ${doc.url}`
       }).catch(console.error);
+      await job.documentPosted(index, total);
       return;
     }
     console.log(`Dataroom document ${index + 1}/${total} "${doc.title}": ${doc.screenshots.length} pages, creating PDF...`);
@@ -213,18 +226,22 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
       title: doc.title,
       initialComment: `${index + 1}/${total}: *${doc.title}*${doc.folder ? ` (${doc.folder})` : ''}${dataroomTypeNote(doc.type)}`
     });
+    await job.documentPosted(index, total);
   };
+  const onSession = (cookies) => job.session(cookies);
 
-  enqueueConversion(() => convert(docUrl, messageText, { ...convertOpts, onDocument })
+  enqueueConversion(() => convert(docUrl, messageText, { ...convertOpts, onDocument, onSession, startIndex })
     .then(async (result) => {
       if (result && result.dataroom) {
         const webLinks = result.documents.filter(d => d.webLink);
-        const converted = result.documents.filter(d => !d.error && !d.webLink);
+        const resumedBefore = result.documents.filter(d => d.resumed);
+        const converted = result.documents.filter(d => !d.error && !d.webLink && !d.resumed);
         const skipped = result.documents.filter(d => d.skipped);
         const failed = result.documents.filter(d => d.error && !d.skipped);
-        console.log(`Dataroom "${result.title}": ${converted.length} converted, ${failed.length} failed, ${skipped.length} skipped, ${webLinks.length} web links`);
+        console.log(`Dataroom "${result.title}": ${converted.length} converted, ${failed.length} failed, ${skipped.length} skipped, ${webLinks.length} web links, ${resumedBefore.length} posted before a restart`);
         const lines = [
-          `Converted ${converted.length} of ${result.documents.length} entr${result.documents.length === 1 ? 'y' : 'ies'} from the DocSend dataroom *${result.title}*.`
+          `Converted ${converted.length + resumedBefore.length} of ${result.documents.length} entr${result.documents.length === 1 ? 'y' : 'ies'} from the DocSend dataroom *${result.title}*`
+            + (resumedBefore.length > 0 ? ` (${resumedBefore.length} of them before the restart).` : '.')
         ];
         if (webLinks.length > 0) {
           lines.push(`${webLinks.length} web link${webLinks.length === 1 ? '' : 's'} passed through as-is (see above).`);
@@ -343,7 +360,31 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
           ? `Sorry, I couldn't convert the DocSend dataroom: ${error.message}`
           : `Sorry, I couldn't convert the ${provider} document. It might require special access or have security restrictions.`;
       await app.client.chat.postMessage({ channel, thread_ts: threadTs, text }).catch(console.error);
-    }));
+    })
+    // Done, failed or parked for a reply: nothing left for a restart to resume.
+    .finally(() => job.finish()));
+}
+
+// Jobs whose state is still stored were cut off by a restart (the OOM
+// killer, a deploy): tell their threads and run them again from where they
+// were, before any new Slack events are handled.
+function resumeInterruptedJobs() {
+  return jobState.resumeInterrupted(jobStore, {
+    postMessage: (message) => app.client.chat.postMessage(message),
+    runJob: async (state, handle) => {
+      runConversion({
+        channel: state.channel,
+        threadTs: state.threadTs,
+        provider: state.provider,
+        convert: state.provider === 'Pitch' ? convertPitchToPDF : convertDocSendToPDF,
+        docUrl: state.docUrl,
+        docId: state.docId,
+        messageText: state.messageText,
+        convertOpts: { email: state.email || null, cookies: state.cookies || null },
+        resume: { handle, state }
+      });
+    }
+  });
 }
 
 // Health check function
@@ -379,6 +420,10 @@ const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET
 });
+
+// Where in-flight job state lives: a private Slack channel (STATE_CHANNEL_ID)
+// that survives Render restarts, else marker files on local disk.
+const jobStore = jobState.createStore({ client: app.client, channelId: process.env.STATE_CHANNEL_ID });
 
 // Verify Slack request signature
 const verifySlackRequest = (req) => {
@@ -621,6 +666,7 @@ expressApp.post('/slack/events', (req, res) => {
 // Start the Slack app
 app.start().then(() => {
   console.log('Slack app is running!');
+  return resumeInterruptedJobs();
 }).catch((error) => {
   console.error('Error starting Slack app:', error);
 });

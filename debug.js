@@ -20,6 +20,12 @@ Flags:
                      it with --cookies=PATH to reuse that session)
   --cookies=PATH     cookies.json from the run that hit the verification wall
   --email=ADDRESS    Email to enter instead of DOCSEND_EMAIL
+  --start-index=N    Dataroom: skip the first N documents (what a resumed job
+                     does after a restart)
+
+Environment: MEMORY_LIMIT_MB (default 512; on macOS the Chrome tree's RSS
+overcounts shared pages, so use a few GB for real runs or a few hundred MB to
+force the abort path), MEMORY_PRESSURE_RATIO, SLIDE_MAX_WIDTH, SLIDE_JPEG_QUALITY.
 
 Artifacts written per checkpoint:
   NN-<step>.png         Full-page screenshot
@@ -41,6 +47,8 @@ const verifyUrl = verifyUrlArg ? verifyUrlArg.slice('--verify-url='.length) : nu
 const cookiesArg = argv.find(a => a.startsWith('--cookies='));
 const emailArg = argv.find(a => a.startsWith('--email='));
 const emailOverride = emailArg ? emailArg.slice('--email='.length) : undefined;
+const startIndexArg = argv.find(a => a.startsWith('--start-index='));
+const startIndex = startIndexArg ? Number(startIndexArg.split('=')[1]) || 0 : 0;
 const url = argv.find(a => /^https?:\/\//.test(a));
 if (!url) {
   console.error('ERROR: no URL provided');
@@ -198,13 +206,19 @@ async function onCheckpoint(name, { page, frame, extra } = {}) {
       keepOpenOnError: keepOpen && !headless,
       verifyUrl,
       cookies,
+      startIndex,
+      onSession: (c) => console.log(`Authorized session: ${c.length} cookies`),
       ...(emailOverride ? { email: emailOverride } : {}),
     });
     if (result && result.dataroom) {
       dataroom = result;
       console.log(`Dataroom "${result.title}": ${result.documents.length} document(s)`);
       result.documents.forEach((d, i) =>
-        console.log(`  ${i + 1}. ${d.folder ? `${d.folder} / ` : ''}${d.title} — ${d.error ? `FAILED: ${d.error}` : `${d.screenshots.length} pages`}`)
+        console.log(`  ${i + 1}. ${d.folder ? `${d.folder} / ` : ''}${d.title} — ${
+          d.resumed ? 'skipped (before --start-index)'
+            : d.skipped ? `SKIPPED: ${d.error}`
+              : d.error ? `FAILED: ${d.error}`
+                : d.webLink ? 'web link' : `${d.screenshots.length} pages`}`)
       );
     } else {
       screenshots = result;
@@ -237,7 +251,7 @@ async function onCheckpoint(name, { page, frame, extra } = {}) {
     }, null, 2));
     for (let i = 0; i < dataroom.documents.length; i++) {
       const d = dataroom.documents[i];
-      if (d.error) continue;
+      if (d.error || d.resumed || d.webLink || !d.screenshots) continue;
       const safe = d.title.replace(/[^a-z0-9]+/gi, '_').replace(/^_+|_+$/g, '').slice(0, 80) || `doc${i + 1}`;
       const pdfPath = path.join(outDir, `output-${String(i + 1).padStart(2, '0')}-${safe}.pdf`);
       try {
