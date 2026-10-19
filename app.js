@@ -7,6 +7,7 @@ const path = require('path');
 const { convertDocSendToPDF, createPDFFromScreenshots } = require('./docsend');
 const { convertPitchToPDF } = require('./pitch');
 const { closeSharedBrowser } = require('./browser');
+const { classifyReply } = require('./threadReplies');
 
 // Full request/event/signature logging is only useful when debugging; the
 // always-on version buried real log lines under health checks firing every 5s.
@@ -86,45 +87,38 @@ async function processNextConversion() {
   processNextConversion();
 }
 
-// DocSend links with the owner's "verify email" option on: the conversion is
-// parked here until someone pastes the verification link DocSend emailed into
-// the same thread. Keyed by channel + thread so the reply can be matched.
-const pendingVerifications = new Map();
-const PENDING_VERIFICATION_TTL_MS = 30 * 60 * 1000;
+// Conversions parked on something only a person can supply: the DocSend
+// verification link, a passcode, or a different email address. Keyed by
+// channel + thread so the next reply in that thread can be matched.
+// kind: 'verify' (waiting for the emailed link) | 'passcode'
+const pendingPrompts = new Map();
+const PENDING_PROMPT_TTL_MS = 30 * 60 * 1000;
 
 function pendingKey(channel, threadTs) {
   return `${channel}:${threadTs}`;
 }
 
-function getPendingVerification(channel, threadTs) {
+function getPendingPrompt(channel, threadTs) {
   const key = pendingKey(channel, threadTs);
-  const pending = pendingVerifications.get(key);
+  const pending = pendingPrompts.get(key);
   if (!pending) return null;
-  if (Date.now() - pending.createdAt > PENDING_VERIFICATION_TTL_MS) {
-    pendingVerifications.delete(key);
+  if (Date.now() - pending.createdAt > PENDING_PROMPT_TTL_MS) {
+    pendingPrompts.delete(key);
     return null;
   }
   return pending;
 }
 
-// The emailed link is usually an email-tracking redirect (e.g. track.pstmrk.it)
-// whose path carries the docsend.com target URL-encoded, so accept any URL
-// that mentions docsend.com once decoded. Slack wraps links as <url|label>
-// and HTML-escapes "&"; the one-time token lives in the URL, so keep it intact.
-function extractDocSendVerificationUrl(text) {
-  const urls = text.match(/https?:\/\/[^\s<>|]+/g) || [];
-  for (const raw of urls) {
-    const cleaned = raw
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/[.,;:)]+$/, '');
-    let decoded = cleaned;
-    try { decoded = decodeURIComponent(decodeURIComponent(cleaned)); } catch (_) {}
-    if (/docsend\.com/i.test(decoded)) return cleaned;
-  }
-  return null;
+function parkConversion(kind, { channel, threadTs, provider, convert, docUrl, docId, messageText, cookies, email }) {
+  pendingPrompts.set(pendingKey(channel, threadTs), {
+    kind, provider, convert, docUrl, docId, messageText, cookies, email,
+    createdAt: Date.now()
+  });
+  console.log(`Parked conversion of ${docUrl} pending ${kind}`);
 }
+
+const EMAIL_OVERRIDE_HINT = (email) =>
+  `I used *${email}*. If the document was shared with a different address, reply here with that email and I'll use it instead.`;
 
 // Dataroom entries that are not documents still open in the viewer, but the
 // PDF is only a snapshot: say so next to the file.
@@ -216,12 +210,10 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
     })
     .catch(async (error) => {
       if (error.code === 'EMAIL_VERIFICATION_REQUIRED') {
-        pendingVerifications.set(pendingKey(channel, threadTs), {
-          provider, convert, docUrl, docId, messageText,
-          cookies: error.cookies,
-          createdAt: Date.now()
+        parkConversion('verify', {
+          channel, threadTs, provider, convert, docUrl, docId, messageText,
+          cookies: error.cookies, email: convertOpts.email
         });
-        console.log(`Parked conversion of ${docUrl} pending email verification`);
         await app.client.chat.postMessage({
           channel,
           thread_ts: threadTs,
@@ -229,8 +221,40 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
             `This link requires email verification, so I can't open it on my own.`,
             `DocSend just emailed a verification link to *${error.email}*.`,
             `*:warning: DO NOT OPEN OR CLICK THE LINK IN THAT EMAIL.* It only works once, and I need to be the one who opens it.`,
-            `Instead, copy the link from the email and paste it here in this thread. You have 30 minutes; after that, post the DocSend link again for a fresh one.`
+            `Instead, copy the link from the email and paste it here in this thread. You have 30 minutes; after that, post the DocSend link again for a fresh one.`,
+            EMAIL_OVERRIDE_HINT(error.email)
           ].join('\n')
+        }).catch(console.error);
+        return;
+      }
+
+      if (error.code === 'PASSCODE_REQUIRED') {
+        parkConversion('passcode', {
+          channel, threadTs, provider, convert, docUrl, docId, messageText,
+          cookies: error.cookies, email: convertOpts.email
+        });
+        await app.client.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          text: [
+            `This link needs a passcode and none was included.`,
+            `Reply here in this thread with just the passcode and I'll continue. You have 30 minutes.`,
+            `(Next time you can include it with the link as \`pw:THEPASSCODE\`.)`
+          ].join('\n')
+        }).catch(console.error);
+        return;
+      }
+
+      if (/rejected the passcode/.test(error.message || '')) {
+        parkConversion('passcode', {
+          channel, threadTs, provider, convert, docUrl, docId,
+          messageText: messageText.replace(/\s*pw:\S+/gi, ''),
+          cookies: convertOpts.cookies, email: convertOpts.email
+        });
+        await app.client.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          text: `That passcode didn't work. Reply here with the right one and I'll try again.`
         }).catch(console.error);
         return;
       }
@@ -369,40 +393,60 @@ expressApp.post('/slack/events', (req, res) => {
         messageId = event.client_msg_id || '';
       }
 
-      // A reply in a thread where a conversion is parked waiting for the
-      // DocSend verification link: finish that conversion with the link.
+      // A reply in a thread where a conversion is parked: a verification
+      // link, a passcode, or a different email address finishes it.
       const replyThreadTs = event.thread_ts || event.message?.thread_ts;
-      if (replyThreadTs && !event.bot_id && event.subtype !== 'message_deleted'
-          && messageText.includes('docsend.com')) {
-        const pending = getPendingVerification(event.channel, replyThreadTs);
-        const verifyUrl = pending ? extractDocSendVerificationUrl(messageText) : null;
-        if (pending && verifyUrl) {
-          const messageKey = `${messageId}_verify_${verifyUrl}`;
+      if (replyThreadTs && !event.bot_id && event.subtype !== 'message_deleted' && messageText) {
+        const pending = getPendingPrompt(event.channel, replyThreadTs);
+        const reply = pending ? classifyReply(messageText) : null;
+        if (pending && reply) {
+          const messageKey = `${messageId}_reply_${replyThreadTs}`;
           if (processedMessages.has(messageKey)) {
-            console.log('Verification message already processed, skipping');
+            console.log('Thread reply already processed, skipping');
             return;
           }
-          markMessageProcessed(messageKey);
-          pendingVerifications.delete(pendingKey(event.channel, replyThreadTs));
-          console.log('Received verification link for parked conversion of', pending.docUrl);
 
-          app.client.chat.postMessage({
-            channel: event.channel,
-            thread_ts: replyThreadTs,
-            text: 'Got the verification link, finishing the conversion...'
-          }).catch(console.error);
+          let convertOpts = null;
+          let messageTextForRetry = pending.messageText;
+          let ack = null;
+          if (reply.kind === 'link' && pending.kind === 'verify') {
+            convertOpts = { verifyUrl: reply.url, cookies: pending.cookies, email: pending.email };
+            ack = 'Got the verification link, finishing the conversion...';
+          } else if (reply.kind === 'email') {
+            // Start over with that address: a verification link, if needed,
+            // then goes to that inbox.
+            convertOpts = { email: reply.email };
+            ack = `Retrying with *${reply.email}*...`;
+          } else if (reply.kind === 'text' && pending.kind === 'passcode') {
+            convertOpts = { cookies: pending.cookies, email: pending.email };
+            messageTextForRetry = `${pending.messageText} pw:${reply.text.replace(/\s+/g, '')}`;
+            ack = 'Got the passcode, continuing...';
+          }
 
-          runConversion({
-            channel: event.channel,
-            threadTs: replyThreadTs,
-            provider: pending.provider,
-            convert: pending.convert,
-            docUrl: pending.docUrl,
-            docId: pending.docId,
-            messageText: pending.messageText,
-            convertOpts: { verifyUrl, cookies: pending.cookies }
-          });
-          return;
+          if (convertOpts) {
+            markMessageProcessed(messageKey);
+            pendingPrompts.delete(pendingKey(event.channel, replyThreadTs));
+            console.log(`Thread reply (${reply.kind}) for parked conversion of`, pending.docUrl);
+
+            app.client.chat.postMessage({
+              channel: event.channel,
+              thread_ts: replyThreadTs,
+              text: ack
+            }).catch(console.error);
+
+            runConversion({
+              channel: event.channel,
+              threadTs: replyThreadTs,
+              provider: pending.provider,
+              convert: pending.convert,
+              docUrl: pending.docUrl,
+              docId: pending.docId,
+              messageText: messageTextForRetry,
+              convertOpts
+            });
+            return;
+          }
+          console.log(`Ignoring thread reply of kind ${reply.kind} while pending ${pending.kind}`);
         }
       }
 

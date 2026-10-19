@@ -33,6 +33,38 @@ class EmailVerificationRequired extends Error {
   }
 }
 
+/**
+ * The link has a passcode gate and the message carried no pw:<passcode>.
+ * Nothing on the page gets us past it, so the caller has to come back with
+ * the passcode (app.js asks for it in the thread).
+ */
+class PasscodeRequired extends Error {
+  constructor(cookies) {
+    super('This DocSend link requires a passcode');
+    this.name = 'PasscodeRequired';
+    this.code = 'PASSCODE_REQUIRED';
+    this.cookies = cookies;
+  }
+}
+
+// A visible passcode field on the page or in any frame.
+async function detectPasscodeGate(page) {
+  const probe = ctx => ctx.evaluate(() => {
+    const visible = el => {
+      const s = window.getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden' && el.offsetHeight > 0;
+    };
+    return [...document.querySelectorAll(
+      'input[type="password"], input[name="passcode"], input[name="passCode"], input[placeholder*="asscode"]'
+    )].some(visible);
+  }).catch(() => false);
+  if (await probe(page)) return true;
+  for (const frame of page.frames()) {
+    if (frame !== page.mainFrame() && await probe(frame)) return true;
+  }
+  return false;
+}
+
 async function detectEmailVerificationWall(page) {
   try {
     return await page.evaluate(() => {
@@ -777,6 +809,13 @@ async function captureLoadedDocument(page, {
     await onCheckpoint('no-email-form', { page });
   }
 
+  if (!docsendPassword && await detectPasscodeGate(page)) {
+    await onCheckpoint('passcode-gate', { page });
+    console.log('Passcode gate detected and no pw: given; asking the caller for it');
+    const sessionCookies = await page.cookies().catch(() => []);
+    throw new PasscodeRequired(sessionCookies);
+  }
+
   if (docsendPassword) {
     console.log('Password required; using generic password entry workflow...');
     const passInputSelectors = [
@@ -902,9 +941,12 @@ async function captureLoadedDocument(page, {
       console.log('Continue button not found after passcode entry');
       await onCheckpoint('passcode-continue-not-found', { page });
     } else {
-      await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 });
+      await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 60000 }).catch(() => {});
       console.log('Passcode submitted');
       await onCheckpoint('passcode-submitted', { page });
+      if (await detectPasscodeGate(page)) {
+        throw new Error('DocSend rejected the passcode');
+      }
     }
   }
 
@@ -1372,7 +1414,7 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
       messageText, email, onCheckpoint, parkOnVerificationWall: !verifyUrl
     });
   } catch (error) {
-    if (error.code === 'EMAIL_VERIFICATION_REQUIRED') {
+    if (error.code === 'EMAIL_VERIFICATION_REQUIRED' || error.code === 'PASSCODE_REQUIRED') {
       throw error;
     }
     console.error('Error capturing document:', error);
@@ -1462,6 +1504,7 @@ async function createPDFFromScreenshots(screenshots) {
 
 module.exports = {
   EmailVerificationRequired,
+  PasscodeRequired,
   convertDocSendToPDF,
   convertDataroom,
   isDataroomPage,

@@ -19,6 +19,7 @@ Flags:
                      DocSend emailed (a previous run wrote cookies.json; pass
                      it with --cookies=PATH to reuse that session)
   --cookies=PATH     cookies.json from the run that hit the verification wall
+  --email=ADDRESS    Email to enter instead of DOCSEND_EMAIL
 
 Artifacts written per checkpoint:
   NN-<step>.png         Full-page screenshot
@@ -38,6 +39,8 @@ if (argv.length === 0 || argv.includes('--help') || argv.includes('-h')) usage()
 const verifyUrlArg = argv.find(a => a.startsWith('--verify-url='));
 const verifyUrl = verifyUrlArg ? verifyUrlArg.slice('--verify-url='.length) : null;
 const cookiesArg = argv.find(a => a.startsWith('--cookies='));
+const emailArg = argv.find(a => a.startsWith('--email='));
+const emailOverride = emailArg ? emailArg.slice('--email='.length) : undefined;
 const url = argv.find(a => /^https?:\/\//.test(a));
 if (!url) {
   console.error('ERROR: no URL provided');
@@ -195,6 +198,7 @@ async function onCheckpoint(name, { page, frame, extra } = {}) {
       keepOpenOnError: keepOpen && !headless,
       verifyUrl,
       cookies,
+      ...(emailOverride ? { email: emailOverride } : {}),
     });
     if (result && result.dataroom) {
       dataroom = result;
@@ -207,6 +211,11 @@ async function onCheckpoint(name, { page, frame, extra } = {}) {
       console.log(`Captured ${screenshots.length} screenshots`);
     }
   } catch (e) {
+    if (e.code === 'PASSCODE_REQUIRED') {
+      console.log('PASSCODE REQUIRED: this link has a passcode gate. Re-run with pw:<passcode> after the URL.');
+      traceFile.end();
+      process.exit(3);
+    }
     if (e.code === 'EMAIL_VERIFICATION_REQUIRED') {
       const cookiesPath = path.join(outDir, 'cookies.json');
       fs.writeFileSync(cookiesPath, JSON.stringify(e.cookies || [], null, 2));
