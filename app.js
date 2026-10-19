@@ -174,7 +174,8 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
           text: [
             `This link requires email verification, so I can't open it on my own.`,
             `DocSend just emailed a verification link to *${error.email}*.`,
-            `Open that email, copy the link, and paste it here in this thread *without clicking it first* (it only works once, and I need to be the one who opens it). You have 30 minutes; after that, post the DocSend link again for a fresh one.`
+            `*:warning: DO NOT OPEN OR CLICK THE LINK IN THAT EMAIL.* It only works once, and I need to be the one who opens it.`,
+            `Instead, copy the link from the email and paste it here in this thread. You have 30 minutes; after that, post the DocSend link again for a fresh one.`
           ].join('\n')
         }).catch(console.error);
         return;
