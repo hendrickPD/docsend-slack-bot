@@ -4,6 +4,31 @@ const { DEFAULT_LAUNCH_ARGS, getSharedBrowser } = require('./browser');
 
 const noop = async () => {};
 
+// A full-page screenshot of a long page (a web link rendered in the viewer, a
+// tall vertical document that didn't take the per-image path) is one bitmap
+// the size of the whole page; on the 512MB instance that OOM-killed the
+// process. Capture at most MAX_FALLBACK_HEIGHT px of it.
+const MAX_FALLBACK_HEIGHT = 4320;
+
+async function boundedFullPageScreenshot(page) {
+  const { width, height } = await page.evaluate(() => ({
+    width: document.documentElement.clientWidth || window.innerWidth,
+    height: Math.max(
+      document.documentElement.scrollHeight || 0,
+      document.body ? document.body.scrollHeight : 0,
+      window.innerHeight
+    )
+  })).catch(() => ({ width: 1920, height: 1080 }));
+  if (height <= MAX_FALLBACK_HEIGHT) {
+    return page.screenshot({ fullPage: true, type: 'jpeg', quality: 80 });
+  }
+  console.log(`  page is ${height}px tall; capturing the first ${MAX_FALLBACK_HEIGHT}px only`);
+  return page.screenshot({
+    type: 'jpeg', quality: 80,
+    clip: { x: 0, y: 0, width: Math.max(1, width), height: MAX_FALLBACK_HEIGHT }
+  });
+}
+
 async function dismissCookieBanner(page) {
   console.log('Attempting to dismiss cookie banners...');
   try {
@@ -568,7 +593,7 @@ async function capturePages(page, { onCheckpoint = noop } = {}) {
     // image is present.
     let shot = await captureSlideImage(page, current);
     if (!shot) {
-      shot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 80 });
+      shot = await boundedFullPageScreenshot(page);
       console.log(`  full-page screenshot fallback: ${shot.length} bytes`);
     }
 
@@ -1062,7 +1087,7 @@ async function captureLoadedDocument(page, {
       await dismissCookieBanner(page);
 
       console.log('Taking fallback screenshot');
-      const fallbackShot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 80 });
+      const fallbackShot = await boundedFullPageScreenshot(page);
       return [fallbackShot];
     } catch (fallbackError) {
       console.error('Fallback screenshot also failed:', fallbackError);
@@ -1339,6 +1364,16 @@ async function convertDataroom(browser, rootPage, {
     const docCheckpoint = (name, args) => onCheckpoint(`doc${i + 1}-${name}`, args);
     let docPage = null;
     try {
+      // A web-link entry is an external site, not a document: rendering it
+      // and screenshotting the whole page is what blew the memory limit, and
+      // the result was never a useful PDF. Hand the link through instead.
+      if (doc.type === 'WEB_LINK') {
+        console.log(`Dataroom document ${docLabel} is a web link; passing it through without rendering`);
+        const linkEntry = { title: doc.title, url: doc.url, folder: doc.folder, type: doc.type, webLink: true, screenshots: [] };
+        if (onDocument) await onDocument(linkEntry, i, documents.length);
+        results.push({ title: doc.title, url: doc.url, folder: doc.folder, type: doc.type, webLink: true, pages: 0 });
+        continue;
+      }
       docPage = await openViewerPage(browser);
       await docPage.goto(doc.url, { waitUntil: 'networkidle0', timeout: 120000 });
       const screenshots = await captureLoadedDocument(docPage, {

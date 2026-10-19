@@ -190,6 +190,13 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
   // Dataroom documents are posted one by one as they are captured, so the
   // pages of a 30-document room never sit in memory together.
   const onDocument = async (doc, index, total) => {
+    if (doc.webLink) {
+      await app.client.chat.postMessage({
+        channel, thread_ts: threadTs,
+        text: `${index + 1}/${total}: *${doc.title}*${doc.folder ? ` (${doc.folder})` : ''} is a web link, not a document: ${doc.url}`
+      }).catch(console.error);
+      return;
+    }
     console.log(`Dataroom document ${index + 1}/${total} "${doc.title}": ${doc.screenshots.length} pages, creating PDF...`);
     const pdfBuffer = await createPDFFromScreenshots(doc.screenshots);
     console.log('PDF buffer size:', pdfBuffer.length, 'bytes');
@@ -204,12 +211,16 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
   enqueueConversion(() => convert(docUrl, messageText, { ...convertOpts, onDocument })
     .then(async (result) => {
       if (result && result.dataroom) {
-        const converted = result.documents.filter(d => !d.error);
+        const webLinks = result.documents.filter(d => d.webLink);
+        const converted = result.documents.filter(d => !d.error && !d.webLink);
         const failed = result.documents.filter(d => d.error);
-        console.log(`Dataroom "${result.title}": ${converted.length} converted, ${failed.length} failed`);
+        console.log(`Dataroom "${result.title}": ${converted.length} converted, ${failed.length} failed, ${webLinks.length} web links`);
         const lines = [
-          `Converted ${converted.length} of ${result.documents.length} document${result.documents.length === 1 ? '' : 's'} from the DocSend dataroom *${result.title}*.`
+          `Converted ${converted.length} of ${result.documents.length} entr${result.documents.length === 1 ? 'y' : 'ies'} from the DocSend dataroom *${result.title}*.`
         ];
+        if (webLinks.length > 0) {
+          lines.push(`${webLinks.length} web link${webLinks.length === 1 ? '' : 's'} passed through as-is (see above).`);
+        }
         if (failed.length > 0) {
           lines.push(`Couldn't convert ${failed.length}:`);
           failed.forEach(d => lines.push(`• ${d.folder ? `${d.folder} / ` : ''}${d.title}: ${d.error}`));
