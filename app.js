@@ -171,14 +171,18 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
         await app.client.chat.postMessage({
           channel,
           thread_ts: threadTs,
-          text: `This link requires email verification. DocSend just emailed a verification link to ${error.email}. Open that email and paste the link here in this thread within 30 minutes, and I'll finish the conversion.`
+          text: [
+            `This link requires email verification, so I can't open it on my own.`,
+            `DocSend just emailed a verification link to *${error.email}*.`,
+            `Open that email, copy the link, and paste it here in this thread *without clicking it first* (it only works once, and I need to be the one who opens it). You have 30 minutes; after that, post the DocSend link again for a fresh one.`
+          ].join('\n')
         }).catch(console.error);
         return;
       }
 
       console.error(`Error processing ${provider} document:`, error);
       const text = convertOpts.verifyUrl
-        ? `Sorry, that verification link didn't unlock the ${provider} document (it may have expired or already been used). Post the original link again to get a fresh one.`
+        ? `Sorry, that verification link didn't unlock the ${provider} document. It has probably expired or was already clicked, since each link works once. Post the DocSend link again, then paste the new link from the newest email without opening it.`
         : `Sorry, I couldn't convert the ${provider} document. It might require special access or have security restrictions.`;
       await app.client.chat.postMessage({ channel, thread_ts: threadTs, text }).catch(console.error);
     }));
