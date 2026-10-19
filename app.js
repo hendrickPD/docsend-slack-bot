@@ -9,6 +9,7 @@ const { convertPitchToPDF } = require('./pitch');
 const { closeSharedBrowser } = require('./browser');
 const { classifyReply } = require('./threadReplies');
 const jobState = require('./jobState');
+const memory = require('./memory');
 
 // Full request/event/signature logging is only useful when debugging; the
 // always-on version buried real log lines under health checks firing every 5s.
@@ -413,6 +414,16 @@ expressApp.get('/', (req, res) => {
 });
 expressApp.head('/', (req, res) => {
   res.status(200).end();
+});
+// Which commit is running (Render sets RENDER_GIT_COMMIT) and how much memory
+// it is using, so a deploy can be confirmed without the Render API.
+expressApp.get('/version', (req, res) => {
+  res.json({
+    commit: process.env.RENDER_GIT_COMMIT || null,
+    memory: memory.describe(),
+    stateStore: jobStore.kind,
+    queued: conversionQueue.length + (conversionActive ? 1 : 0)
+  });
 });
 
 // Initialize Slack app
