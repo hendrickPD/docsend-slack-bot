@@ -28,6 +28,104 @@ class AbortFlag {
   check() { if (this.reason !== null) throw new CaptureAborted(this.reason); }
 }
 
+// Page images are re-encoded no wider than SLIDE_MAX_WIDTH at
+// SLIDE_JPEG_QUALITY: DocSend serves slides at 2048px, and the decoded
+// bitmap of each page plus its JPEG is what the 512MB instance runs out of.
+// Sources already narrower than the bound keep their size.
+const DEFAULT_SLIDE_MAX_WIDTH = 1600;
+const DEFAULT_SLIDE_JPEG_QUALITY = 75;
+
+function slideMaxWidth() {
+  const n = Number(process.env.SLIDE_MAX_WIDTH);
+  return Number.isFinite(n) && n > 0 ? Math.round(n) : DEFAULT_SLIDE_MAX_WIDTH;
+}
+
+// 1-100, as puppeteer's screenshot quality; canvas wants it as 0-1.
+function slideJpegQuality() {
+  const n = Number(process.env.SLIDE_JPEG_QUALITY);
+  return Number.isFinite(n) && n > 0 && n <= 100 ? Math.round(n) : DEFAULT_SLIDE_JPEG_QUALITY;
+}
+
+// Runs inside the page (passed to ElementHandle.evaluate, so it must not
+// close over anything): draw the decoded <img> onto a canvas no wider than
+// maxWidth and return it as a JPEG data URL.
+function encodeBoundedJpeg(el, maxWidth, quality) {
+  const srcW = el.naturalWidth || el.width;
+  const srcH = el.naturalHeight || el.height;
+  const scale = srcW > maxWidth ? maxWidth / srcW : 1;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(srcW * scale));
+  canvas.height = Math.max(1, Math.round(srcH * scale));
+  const ctx = canvas.getContext('2d');
+  if (scale < 1) {
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+  }
+  ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
+  return { dataUrl: canvas.toDataURL('image/jpeg', quality), width: canvas.width, height: canvas.height, scaled: scale < 1 };
+}
+
+// Runs inside the page: fetch the image bytes (session cookies carry) and
+// re-encode them under the same bound. When the bytes cannot be decoded as
+// an image the raw bytes come back instead.
+async function fetchBoundedJpeg(url, maxWidth, quality) {
+  const resp = await fetch(url, { credentials: 'include' });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const blob = await resp.blob();
+  try {
+    const bitmap = await createImageBitmap(blob);
+    const scale = bitmap.width > maxWidth ? maxWidth / bitmap.width : 1;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const ctx = canvas.getContext('2d');
+    if (scale < 1) {
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+    }
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    return { dataUrl: canvas.toDataURL('image/jpeg', quality), width: canvas.width, height: canvas.height, scaled: scale < 1 };
+  } catch (e) {
+    return { bytes: Array.from(new Uint8Array(await blob.arrayBuffer())) };
+  }
+}
+
+function bufferFromEncoded(encoded) {
+  if (encoded.dataUrl) return Buffer.from(encoded.dataUrl.split(',')[1], 'base64');
+  return Buffer.from(encoded.bytes);
+}
+
+function describeEncoded(encoded) {
+  return encoded.dataUrl
+    ? `${encoded.width}x${encoded.height}${encoded.scaled ? ' (downscaled)' : ''}`
+    : 'raw bytes';
+}
+
+/**
+ * A clipped JPEG screenshot no wider than SLIDE_MAX_WIDTH. puppeteer 10 pins
+ * the clip's scale to 1, so a downscaled capture goes straight to the
+ * Page.captureScreenshot command; the plain path stays for clips already
+ * within the bound.
+ */
+async function boundedClipScreenshot(page, clip, quality) {
+  const maxWidth = slideMaxWidth();
+  const scale = clip.width > maxWidth ? maxWidth / clip.width : 1;
+  if (scale === 1) return page.screenshot({ type: 'jpeg', quality, clip });
+  try {
+    await page._client.send('Target.activateTarget', { targetId: page.target()._targetId }).catch(() => {});
+    const result = await page._client.send('Page.captureScreenshot', {
+      format: 'jpeg', quality,
+      clip: { ...clip, scale },
+      captureBeyondViewport: true
+    });
+    return Buffer.from(result.data, 'base64');
+  } catch (e) {
+    console.log(`  scaled screenshot failed (${e.message}); capturing at full size`);
+    return page.screenshot({ type: 'jpeg', quality, clip });
+  }
+}
+
 // A full-page screenshot of a long page (a web link rendered in the viewer, a
 // tall vertical document that didn't take the per-image path) is one bitmap
 // the size of the whole page; on the 512MB instance that OOM-killed the
@@ -166,6 +264,8 @@ async function detectEmailVerificationWall(page) {
  */
 async function captureVerticalPages(page, { onCheckpoint = noop, abort = new AbortFlag() } = {}) {
   console.log('Capturing vertical document pages (per-image strategy)...');
+  const maxWidth = slideMaxWidth();
+  const quality = slideJpegQuality();
   // Hide UI chrome + cookie banner so nothing overlays the page images
   await page.evaluate(() => {
     const selectors = [
@@ -220,39 +320,28 @@ async function captureVerticalPages(page, { onCheckpoint = noop, abort = new Abo
 
     let shot = null;
 
-    // Strategy 1: re-encode the already-decoded <img> through a canvas. No new
-    // network request, so it can't hit expired signed URLs, and it yields the
-    // natural-resolution image. Requires --disable-web-security (canvas taint).
+    // Strategy 1: re-encode the already-decoded <img> through a canvas, no
+    // wider than SLIDE_MAX_WIDTH. No new network request, so it can't hit
+    // expired signed URLs. Requires --disable-web-security (canvas taint).
     if (info.naturalWidth > 0) {
       abort.check();
       try {
-        const dataUrl = await img.evaluate(el => {
-          const canvas = document.createElement('canvas');
-          canvas.width = el.naturalWidth;
-          canvas.height = el.naturalHeight;
-          canvas.getContext('2d').drawImage(el, 0, 0);
-          return canvas.toDataURL('image/jpeg', 0.9);
-        });
-        shot = Buffer.from(dataUrl.split(',')[1], 'base64');
-        console.log(`  canvas re-encode: ${shot.length} bytes`);
+        const encoded = await img.evaluate(encodeBoundedJpeg, maxWidth, quality / 100);
+        shot = bufferFromEncoded(encoded);
+        console.log(`  canvas re-encode: ${shot.length} bytes, ${describeEncoded(encoded)}`);
       } catch (canvasErr) {
         console.log(`  canvas re-encode failed (${canvasErr.message})`);
       }
     }
 
     // Strategy 2: fetch the image bytes from its URL in the browser context
-    // (session cookies carry).
+    // (session cookies carry) and re-encode them under the same bound.
     if (!shot) {
       abort.check();
       try {
-        const bytes = await page.evaluate(async (url) => {
-          const resp = await fetch(url, { credentials: 'include' });
-          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          const buf = new Uint8Array(await resp.arrayBuffer());
-          return Array.from(buf);
-        }, info.src);
-        shot = Buffer.from(bytes);
-        console.log(`  fetched ${shot.length} bytes from CDN`);
+        const encoded = await page.evaluate(fetchBoundedJpeg, info.src, maxWidth, quality / 100);
+        shot = bufferFromEncoded(encoded);
+        console.log(`  fetched from CDN: ${shot.length} bytes, ${describeEncoded(encoded)}`);
       } catch (fetchErr) {
         console.log(`  direct fetch failed (${fetchErr.message}), falling back to screenshot`);
       }
@@ -276,7 +365,7 @@ async function captureVerticalPages(page, { onCheckpoint = noop, abort = new Abo
       }
       await img.evaluate(el => el.scrollIntoView({ block: 'start', behavior: 'instant' }));
       await page.waitForTimeout(500);
-      shot = await img.screenshot({ type: 'jpeg', quality: 80 });
+      shot = await img.screenshot({ type: 'jpeg', quality });
       console.log(`  element screenshot: ${shot.length} bytes`);
     }
 
@@ -303,6 +392,8 @@ async function captureVerticalPages(page, { onCheckpoint = noop, abort = new Abo
  */
 async function captureSlideImage(page, pageNum, { abort = new AbortFlag() } = {}) {
   abort.check();
+  const maxWidth = slideMaxWidth();
+  const quality = slideJpegQuality();
   const handle = await page.evaluateHandle((pn) => {
     const imgs = Array.from(document.querySelectorAll('img.preso-view.page-view'));
     if (imgs.length === 0) return null;
@@ -347,21 +438,15 @@ async function captureSlideImage(page, pageNum, { abort = new AbortFlag() } = {}
     }));
     console.log(`  slide image ${info.naturalWidth}x${info.naturalHeight} (reported page ${pageNum})`);
 
-    // Strategy 1: re-encode the already-decoded <img> through a canvas. No new
-    // network request (can't hit expired signed URLs) and yields natural
-    // resolution. Requires --disable-web-security for the cross-origin read.
+    // Strategy 1: re-encode the already-decoded <img> through a canvas, no
+    // wider than SLIDE_MAX_WIDTH. No new network request (can't hit expired
+    // signed URLs). Requires --disable-web-security for the cross-origin read.
     if (info.naturalWidth > 0) {
       abort.check();
       try {
-        const dataUrl = await img.evaluate(el => {
-          const canvas = document.createElement('canvas');
-          canvas.width = el.naturalWidth;
-          canvas.height = el.naturalHeight;
-          canvas.getContext('2d').drawImage(el, 0, 0);
-          return canvas.toDataURL('image/jpeg', 0.9);
-        });
-        const buf = Buffer.from(dataUrl.split(',')[1], 'base64');
-        console.log(`  canvas re-encode: ${buf.length} bytes`);
+        const encoded = await img.evaluate(encodeBoundedJpeg, maxWidth, quality / 100);
+        const buf = bufferFromEncoded(encoded);
+        console.log(`  canvas re-encode: ${buf.length} bytes, ${describeEncoded(encoded)}`);
         return buf;
       } catch (canvasErr) {
         console.log(`  canvas re-encode failed (${canvasErr.message})`);
@@ -369,17 +454,13 @@ async function captureSlideImage(page, pageNum, { abort = new AbortFlag() } = {}
     }
 
     // Strategy 2: fetch the image bytes from its URL in the page context
-    // (session cookies carry).
+    // (session cookies carry) and re-encode them under the same bound.
     if (info.src) {
       abort.check();
       try {
-        const bytes = await page.evaluate(async (url) => {
-          const resp = await fetch(url, { credentials: 'include' });
-          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-          return Array.from(new Uint8Array(await resp.arrayBuffer()));
-        }, info.src);
-        const buf = Buffer.from(bytes);
-        console.log(`  fetched ${buf.length} bytes from CDN`);
+        const encoded = await page.evaluate(fetchBoundedJpeg, info.src, maxWidth, quality / 100);
+        const buf = bufferFromEncoded(encoded);
+        console.log(`  fetched from CDN: ${buf.length} bytes, ${describeEncoded(encoded)}`);
         return buf;
       } catch (fetchErr) {
         console.log(`  direct fetch failed (${fetchErr.message})`);
@@ -389,7 +470,7 @@ async function captureSlideImage(page, pageNum, { abort = new AbortFlag() } = {}
     // Strategy 3: element screenshot of the slide image itself.
     abort.check();
     try {
-      const shot = await img.screenshot({ type: 'jpeg', quality: 80 });
+      const shot = await img.screenshot({ type: 'jpeg', quality });
       console.log(`  element screenshot: ${shot.length} bytes`);
       return shot;
     } catch (shotErr) {
@@ -426,6 +507,7 @@ const SPREADSHEET_MAX_HEIGHT = 8000;
 async function captureSpreadsheetPages(page, frame, { onCheckpoint = noop, abort = new AbortFlag() } = {}) {
   const tabCount = await frame.$$eval('a.tabstrip-link', els => els.length).catch(() => 0);
   console.log(`Spreadsheet preview detected with ${tabCount} sheet tab(s)`);
+  const quality = slideJpegQuality();
 
   // Hide the "Cookies & CCPA preferences" link (a.presentation-privacy-policy_text,
   // fixed to the viewport's bottom-right) and the consent iframe via a
@@ -530,19 +612,19 @@ async function captureSpreadsheetPages(page, frame, { onCheckpoint = noop, abort
     // Discard the first capture after the viewport change: Chromium's first
     // rasterization at the new size can come back solid black.
     abort.check();
-    await page.screenshot({ type: 'jpeg', quality: 30, clip });
+    await boundedClipScreenshot(page, clip, 30);
     // And occasionally the buffer itself is corrupt; retry once, then skip the
     // sheet rather than poison the whole PDF (createPDFFromScreenshots throws
     // on an invalid image).
     const isValidImage = b => Buffer.isBuffer(b) && b.length > 4 &&
       ((b[0] === 0xFF && b[1] === 0xD8) || (b[0] === 0x89 && b[1] === 0x50));
     abort.check();
-    let shot = await page.screenshot({ type: 'jpeg', quality: 80, clip });
+    let shot = await boundedClipScreenshot(page, clip, quality);
     if (!isValidImage(shot)) {
       console.log('  screenshot buffer invalid; retrying once');
       await page.waitForTimeout(500);
       abort.check();
-      shot = await page.screenshot({ type: 'jpeg', quality: 80, clip });
+      shot = await boundedClipScreenshot(page, clip, quality);
     }
     if (isValidImage(shot)) {
       console.log(`  captured ${clip.width}x${clip.height} sheet: ${shot.length} bytes`);
