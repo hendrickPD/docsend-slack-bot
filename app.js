@@ -314,6 +314,22 @@ function runConversion({ channel, threadTs, provider, convert, docUrl, docId, me
         return;
       }
 
+      if (error.code === 'EMAIL_REJECTED') {
+        parkConversion('email', {
+          channel, threadTs, provider, convert, docUrl, docId, messageText,
+          cookies: error.cookies, email: null
+        });
+        await app.client.chat.postMessage({
+          channel,
+          thread_ts: threadTs,
+          text: [
+            `DocSend didn't accept *${error.email}* (${error.reason}).`,
+            `Reply here in this thread with the email address the document was shared with and I'll try again. You have 30 minutes.`
+          ].join('\n')
+        }).catch(console.error);
+        return;
+      }
+
       if (error.code === 'PASSCODE_REQUIRED') {
         parkConversion('passcode', {
           channel, threadTs, provider, convert, docUrl, docId, messageText,
@@ -511,6 +527,19 @@ expressApp.post('/slack/events', (req, res) => {
 
     // Handle different message types
     if (event.type === 'message') {
+      // Never react to the bot's own messages: its thread replies and the
+      // job-state messages in STATE_CHANNEL_ID quote DocSend links, and
+      // treating those as new requests started conversions in a loop.
+      const fromBot = event.bot_id || event.subtype === 'bot_message'
+        || event.message?.bot_id || event.message?.subtype === 'bot_message';
+      if (fromBot) {
+        if (DEBUG) console.log('Ignoring a bot-authored message');
+        return;
+      }
+      if (process.env.STATE_CHANNEL_ID && event.channel === process.env.STATE_CHANNEL_ID) {
+        return;
+      }
+
       let messageText = '';
       let messageId = '';
 
@@ -641,11 +670,17 @@ expressApp.post('/slack/events', (req, res) => {
           // entering the poster's own email at DocSend's gate when known.
           const posterId = event.user || event.message?.user;
           lookupPosterEmail(posterId).then((posterEmail) => {
+            // Unknown poster email: use the shared DOCSEND_EMAIL address
+            // (the thread prompt still offers to retry with another one);
+            // only ask in the thread when no fallback is configured.
+            const fallbackEmail = process.env.DOCSEND_EMAIL || null;
+            const email = posterEmail || fallbackEmail;
             if (posterEmail) console.log(`Using poster's email for DocSend gates: ${posterEmail}`);
-            else console.log('Poster email unknown; the bot will ask in the thread if the link has an email gate');
+            else if (fallbackEmail) console.log(`Poster email unknown; using DOCSEND_EMAIL (${fallbackEmail}) for DocSend gates`);
+            else console.log('Poster email unknown and DOCSEND_EMAIL unset; the bot will ask in the thread if the link has an email gate');
             runConversion({
               channel: event.channel, threadTs, provider, convert, docUrl, docId, messageText,
-              convertOpts: { email: posterEmail || null }
+              convertOpts: { email }
             });
           });
         }

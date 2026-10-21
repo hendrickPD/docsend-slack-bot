@@ -209,6 +209,46 @@ class EmailRequired extends Error {
   }
 }
 
+/**
+ * DocSend refused the address we typed ("must be a valid email address that
+ * can receive messages", or the document is restricted to other addresses):
+ * the gate is still showing with an error. Ask for another address.
+ */
+class EmailRejected extends Error {
+  constructor(email, reason, cookies) {
+    super(`DocSend rejected the email address ${email}: ${reason}`);
+    this.name = 'EmailRejected';
+    this.code = 'EMAIL_REJECTED';
+    this.email = email;
+    this.reason = reason;
+    this.cookies = cookies;
+  }
+}
+
+// After an email submit: is the gate still up with a validation error?
+async function detectEmailRejection(page) {
+  const probe = ctx => ctx.evaluate(() => {
+    const visible = el => {
+      if (!el) return false;
+      const s = window.getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden' && el.offsetHeight > 0;
+    };
+    const input = document.querySelector('input[type="email"], input[name="email"]');
+    if (!visible(input)) return null;
+    const text = document.body.innerText || '';
+    const m = text.match(/must be a valid email[^\n]*|not (?:authorized|allowed) to view[^\n]*|doesn't have access[^\n]*|does not have access[^\n]*|review the problems[^\n]*/i);
+    return m ? m[0].trim() : null;
+  }).catch(() => null);
+  const main = await probe(page);
+  if (main) return main;
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    const r = await probe(frame);
+    if (r) return r;
+  }
+  return null;
+}
+
 async function requireEmail(page, email) {
   if (email) return;
   console.log('Email gate detected but no email is known; asking the caller for one');
@@ -978,6 +1018,13 @@ async function captureLoadedDocument(page, {
     await onCheckpoint('no-email-form', { page });
   }
 
+  const emailRejection = await detectEmailRejection(page);
+  if (emailRejection) {
+    await onCheckpoint('email-rejected', { page, extra: { reason: emailRejection } });
+    console.log(`DocSend rejected the email ${email}: ${emailRejection}`);
+    throw new EmailRejected(email, emailRejection, await page.cookies().catch(() => []));
+  }
+
   if (!docsendPassword && await detectPasscodeGate(page)) {
     await onCheckpoint('passcode-gate', { page });
     console.log('Passcode gate detected and no pw: given; asking the caller for it');
@@ -1688,7 +1735,7 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
     memory.logUsage('at job end');
     return screenshots;
   } catch (error) {
-    if (['EMAIL_VERIFICATION_REQUIRED', 'PASSCODE_REQUIRED', 'EMAIL_REQUIRED'].includes(error.code)) {
+    if (['EMAIL_VERIFICATION_REQUIRED', 'PASSCODE_REQUIRED', 'EMAIL_REQUIRED', 'EMAIL_REJECTED'].includes(error.code)) {
       throw error;
     }
     if (abort.aborted || error.code === 'CAPTURE_ABORTED') {
@@ -1788,6 +1835,7 @@ async function createPDFFromScreenshots(screenshots) {
 module.exports = {
   EmailVerificationRequired,
   EmailRequired,
+  EmailRejected,
   PasscodeRequired,
   CaptureAborted,
   AbortFlag,
