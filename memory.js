@@ -1,4 +1,6 @@
 const fs = require('fs');
+const v8 = require('v8');
+const vm = require('vm');
 const { execFileSync } = require('child_process');
 
 // Memory watchdog. The Render instance has a 512Mi cgroup limit and the kernel
@@ -10,7 +12,15 @@ const { execFileSync } = require('child_process');
 
 const MB = 1024 * 1024;
 const DEFAULT_LIMIT_MB = 512;
-const DEFAULT_PRESSURE_RATIO = 0.85;
+// Chrome's baseline plus a normal deck sits around 85-90% of the 512MB
+// instance, so the watchdog only reacts at 95% and then first tries to shed
+// memory (close spare tabs, purge the renderer's decoded-image cache, run
+// Node's GC) and gives the usage MEMORY_PRESSURE_GRACE_MS to come back down
+// before it gives the capture up. Usage that climbs past MEMORY_HARD_RATIO
+// while waiting is aborted at once: the kernel kills the process at 100%.
+const DEFAULT_PRESSURE_RATIO = 0.95;
+const DEFAULT_GRACE_MS = 6000;
+const DEFAULT_HARD_RATIO = 0.98;
 const DEFAULT_POLL_MS = 2000;
 
 const CGROUP_V2 = { usage: '/sys/fs/cgroup/memory.current', limit: '/sys/fs/cgroup/memory.max', stat: '/sys/fs/cgroup/memory.stat' };
@@ -123,8 +133,46 @@ function pressureRatio() {
   return Number.isFinite(r) && r > 0 && r <= 1 ? r : DEFAULT_PRESSURE_RATIO;
 }
 
+function graceMs() {
+  const n = Number(process.env.MEMORY_PRESSURE_GRACE_MS);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_GRACE_MS;
+}
+
+function hardRatio() {
+  const r = Number(process.env.MEMORY_HARD_RATIO);
+  return Number.isFinite(r) && r > 0 && r <= 1 ? r : DEFAULT_HARD_RATIO;
+}
+
 function sourceName() {
   return getSource().kind;
+}
+
+// Node's garbage collector, when it can be reached: global.gc exists when the
+// process was started with --expose-gc (the start script does that); otherwise
+// turn the flag on at runtime and fetch gc from a fresh context. Returns
+// false when neither works.
+let gcFn = null;
+function forceGc() {
+  if (!gcFn) {
+    if (typeof global.gc === 'function') {
+      gcFn = global.gc;
+    } else {
+      try {
+        v8.setFlagsFromString('--expose-gc');
+        const fn = vm.runInNewContext('gc');
+        if (typeof fn === 'function') gcFn = fn;
+      } catch (_) {
+        gcFn = null;
+      }
+    }
+  }
+  if (!gcFn) return false;
+  try {
+    gcFn();
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 function formatMB(bytes) {
@@ -142,16 +190,60 @@ function logUsage(label) {
 }
 
 /**
- * Poll usage every pollMs while a conversion runs and call onPressure({ usage,
- * limit, ratio }) once when usage crosses MEMORY_PRESSURE_RATIO of the limit.
- * The handle's rearm() lets it fire again (after the shared browser has been
- * relaunched and the memory is back), stop() ends the polling.
+ * Poll usage every pollMs while a conversion runs. Two stages:
+ *
+ *  1. The first time usage crosses MEMORY_PRESSURE_RATIO of the limit, call
+ *     onShed({ usage, limit, threshold, ratio }) (may be async: close spare
+ *     tabs, recycle the viewer tab, run GC) and keep polling meanwhile.
+ *  2. If usage is still above the threshold once MEMORY_PRESSURE_GRACE_MS have
+ *     passed since the shed finished (or since it started, if it takes longer
+ *     than MAX_SHED_MS), call onPressure({ usage, limit, ratio }) once. Usage
+ *     above MEMORY_HARD_RATIO of the limit skips the wait.
+ *
+ * Usage that drops back under the threshold re-arms the first stage, so a later
+ * climb sheds again. The handle's rearm() lets onPressure fire again (after the
+ * shared browser has been relaunched and the memory is back), stop() ends the
+ * polling.
  */
-function watch(onPressure, { pollMs = DEFAULT_POLL_MS } = {}) {
+const MAX_SHED_MS = 60000;
+
+function watch(onPressure, { onShed = null, pollMs = DEFAULT_POLL_MS, graceMs: grace = graceMs() } = {}) {
   const max = limit();
   const threshold = Math.floor(max * pressureRatio());
+  const hardLimit = Math.floor(max * hardRatio());
   let tripped = false;
   let stopped = false;
+  // The current excursion above the threshold: when the shed started and
+  // finished (null while it runs).
+  let excursion = null;
+
+  const fire = (used, why) => {
+    tripped = true;
+    console.log(`Memory pressure: ${formatMB(used)} of ${formatMB(max)} (threshold ${formatMB(threshold)}, ${why}, ${sourceName()})`);
+    try {
+      onPressure({ usage: used, limit: max, ratio: used / max });
+    } catch (e) {
+      console.error('Memory pressure handler failed:', e);
+    }
+  };
+
+  const startShed = (used) => {
+    const ex = { startedAt: Date.now(), doneAt: null };
+    excursion = ex;
+    console.log(`Memory high: ${formatMB(used)} of ${formatMB(max)} (threshold ${formatMB(threshold)}, ${sourceName()}); shedding, then ${grace}ms to recover`);
+    Promise.resolve()
+      .then(() => (onShed ? onShed({ usage: used, limit: max, threshold, ratio: used / max }) : undefined))
+      .catch(e => console.error('Memory shed handler failed:', e))
+      .then(() => {
+        ex.doneAt = Date.now();
+        if (stopped || excursion !== ex) return;
+        let after = null;
+        try { after = usage(); } catch (_) {}
+        if (after !== null) {
+          console.log(`Memory after shedding: ${formatMB(after)} of ${formatMB(max)} (was ${formatMB(used)}, shed took ${Math.round((ex.doneAt - ex.startedAt) / 1000)}s)`);
+        }
+      });
+  };
 
   const check = () => {
     if (stopped || tripped) return;
@@ -162,14 +254,27 @@ function watch(onPressure, { pollMs = DEFAULT_POLL_MS } = {}) {
       console.log('Memory watchdog read failed:', e.message);
       return;
     }
-    if (used > threshold) {
-      tripped = true;
-      console.log(`Memory pressure: ${formatMB(used)} of ${formatMB(max)} (threshold ${formatMB(threshold)}, ${sourceName()})`);
-      try {
-        onPressure({ usage: used, limit: max, ratio: used / max });
-      } catch (e) {
-        console.error('Memory pressure handler failed:', e);
+    if (used <= threshold) {
+      if (excursion && excursion.doneAt !== null) {
+        console.log(`Memory back under the threshold: ${formatMB(used)} of ${formatMB(max)}`);
+        excursion = null;
       }
+      // A shed still running is left to finish; its excursion ends when the
+      // next reading is low too.
+      return;
+    }
+    if (excursion === null) {
+      startShed(used);
+      return;
+    }
+    if (used > hardLimit) {
+      fire(used, `above the hard limit ${formatMB(hardLimit)}`);
+      return;
+    }
+    const now = Date.now();
+    const graceFrom = excursion.doneAt !== null ? excursion.doneAt : excursion.startedAt + MAX_SHED_MS;
+    if (now - graceFrom >= grace) {
+      fire(used, `still high ${Math.round((now - excursion.startedAt) / 1000)}s after shedding began`);
     }
   };
 
@@ -184,11 +289,14 @@ function watch(onPressure, { pollMs = DEFAULT_POLL_MS } = {}) {
     },
     rearm() {
       tripped = false;
+      excursion = null;
     },
     check,
     get tripped() { return tripped; },
-    threshold
+    threshold,
+    hardLimit,
+    graceMs: grace
   };
 }
 
-module.exports = { usage, limit, watch, logUsage, describe, formatMB, sourceName, pressureRatio, MB };
+module.exports = { usage, limit, watch, logUsage, describe, formatMB, sourceName, pressureRatio, graceMs, hardRatio, forceGc, MB };

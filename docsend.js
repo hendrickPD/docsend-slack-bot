@@ -1,6 +1,6 @@
 const puppeteer = require('puppeteer');
 const { PDFDocument } = require('pdf-lib');
-const { DEFAULT_LAUNCH_ARGS, getSharedBrowser, closeSharedBrowser } = require('./browser');
+const { DEFAULT_LAUNCH_ARGS, getSharedBrowser, closeSharedBrowser, shedBrowserMemory } = require('./browser');
 const memory = require('./memory');
 
 const noop = async () => {};
@@ -26,6 +26,42 @@ class AbortFlag {
   abort(reason) { if (this.reason === null) this.reason = reason || 'aborted'; }
   reset() { this.reason = null; }
   check() { if (this.reason !== null) throw new CaptureAborted(this.reason); }
+}
+
+// The memory watchdog asks for a shed; the capture loop grants it at its next
+// page boundary, the only point where the viewer tab can be swapped for a
+// fresh one. request() resolves when the loop has done so (true) or when
+// nothing serviced it within timeoutMs (false: the other capture paths don't
+// recycle, and a gate may be in the way).
+class ShedRequests {
+  constructor() { this.pending = null; }
+  get requested() { return this.pending !== null; }
+  request(timeoutMs = 30000) {
+    if (this.pending) return this.pending.promise;
+    const pending = {};
+    pending.promise = new Promise(resolve => {
+      pending.resolve = resolve;
+      pending.timer = setTimeout(() => {
+        if (this.pending === pending) this.pending = null;
+        resolve(false);
+      }, timeoutMs);
+      if (pending.timer.unref) pending.timer.unref();
+    });
+    this.pending = pending;
+    return pending.promise;
+  }
+  async service(fn) {
+    const pending = this.pending;
+    if (!pending) return;
+    this.pending = null;
+    clearTimeout(pending.timer);
+    let ok = false;
+    try {
+      ok = await fn();
+    } finally {
+      pending.resolve(ok !== false);
+    }
+  }
 }
 
 // Page images are re-encoded no wider than SLIDE_MAX_WIDTH at
@@ -62,7 +98,11 @@ function encodeBoundedJpeg(el, maxWidth, quality) {
     ctx.imageSmoothingQuality = 'high';
   }
   ctx.drawImage(el, 0, 0, canvas.width, canvas.height);
-  return { dataUrl: canvas.toDataURL('image/jpeg', quality), width: canvas.width, height: canvas.height, scaled: scale < 1 };
+  const out = { dataUrl: canvas.toDataURL('image/jpeg', quality), width: canvas.width, height: canvas.height, scaled: scale < 1 };
+  // Release the bitmap now instead of when the GC gets to the canvas.
+  canvas.width = 0;
+  canvas.height = 0;
+  return out;
 }
 
 // Runs inside the page: fetch the image bytes (session cookies carry) and
@@ -679,7 +719,160 @@ async function captureSpreadsheetPages(page, frame, { onCheckpoint = noop, abort
   return screenshots;
 }
 
-async function capturePages(page, { onCheckpoint = noop, abort = new AbortFlag() } = {}) {
+// The page number the viewer's toolbar reports, or null without a counter.
+async function currentPageNumber(page) {
+  return page.evaluate(() => {
+    const el = document.querySelector('span[aria-label="page number"]');
+    return el ? parseInt(el.textContent, 10) : null;
+  }).catch(() => null);
+}
+
+async function waitForViewerIdle(page) {
+  await page.waitForFunction(
+    () => !document.querySelector('.loading-spinner') && !document.querySelector('.loading'),
+    { timeout: 30000 }
+  );
+}
+
+// Hide the viewer chrome, focus the page and wait for the first slide image.
+async function prepareDeckViewer(page) {
+  await page.evaluate(() => {
+    const selectors = [
+      'header', '.header', '.top-bar', '.presentation-toolbar',
+      '.navbar-fixed-bottom', '.bottom-bar', '.presentation-fixed-footer'
+    ];
+    selectors.forEach(sel =>
+      document.querySelectorAll(sel).forEach(el => el.style.display = 'none')
+    );
+  });
+  console.log('UI hidden; focusing page');
+  const { width, height } = page.viewport();
+  await page.mouse.click(width / 2, height / 2);
+  await page.evaluate(() => {
+    const el = document.querySelector('#onetrust-consent-sdk');
+    if (el) el.style.display = 'none';
+  });
+  await waitForViewerIdle(page);
+  // The preso-view waitForSelector below covers slide readiness; this is just
+  // a short settle for layout after hiding the UI chrome.
+  await page.waitForTimeout(1000);
+
+  // Decks render each slide as <img class="preso-view page-view">. Wait for the
+  // first one so we don't start capturing a blank viewer. If it never appears
+  // (unexpected viewer markup) we still proceed and rely on full-page fallback.
+  try {
+    await page.waitForSelector('img.preso-view.page-view', { timeout: 15000 });
+  } catch (e) {
+    console.log('No preso-view slide image appeared within timeout; relying on full-page screenshots');
+  }
+}
+
+/**
+ * Show page `target` without stepping through the pages in between: the
+ * toolbar's "Jump to Page" grid (#page-picker, one .document-thumb-container
+ * per page) is tried first, then arrow keys. Each page the viewer shows costs
+ * a decoded 2048px bitmap, so stepping is the fallback, not the default.
+ */
+async function jumpToPage(page, target) {
+  let current = await currentPageNumber(page);
+  if (current === null || current === target) return current;
+
+  for (let attempt = 1; attempt <= 2 && current !== target; attempt++) {
+    try {
+      const thumb = `.document-thumb-container[data-page-num="${target}"]`;
+      const gridVisible = await page.$eval('.page-grid', el => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden';
+      }).catch(() => false);
+      // The toolbar is hidden by prepareDeckViewer; the button still responds
+      // to a DOM click.
+      if (!gridVisible) await page.$eval('#page-picker', el => el.click());
+      await page.waitForSelector(thumb, { visible: true, timeout: 5000 });
+      // Let the grid finish animating in before clicking inside it.
+      await page.waitForTimeout(700);
+      await page.click(thumb);
+      await page.waitForFunction(
+        (t) => {
+          const el = document.querySelector('span[aria-label="page number"]');
+          return el && parseInt(el.textContent, 10) === t;
+        },
+        { timeout: 5000 },
+        target
+      ).catch(() => {});
+      await page.waitForTimeout(400);
+    } catch (e) {
+      console.log(`  jump to page ${target} via the page grid failed (${e.message})`);
+    }
+    current = await currentPageNumber(page);
+    if (current !== target) {
+      // Close a grid that stayed open; the arrow keys below need the viewer.
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(300);
+      current = await currentPageNumber(page);
+    }
+  }
+  if (current === target) {
+    console.log(`  jumped to page ${target} via the page grid`);
+    return current;
+  }
+
+  console.log(`  stepping from page ${current} to ${target} with the arrow keys`);
+  for (let presses = 0; current !== null && current !== target && presses < 500; presses++) {
+    await page.keyboard.press(current < target ? 'ArrowRight' : 'ArrowLeft');
+    const before = current;
+    await page.waitForFunction(
+      (prev) => {
+        const el = document.querySelector('span[aria-label="page number"]');
+        return el && parseInt(el.textContent, 10) !== prev;
+      },
+      { timeout: 2000 },
+      before
+    ).catch(() => {});
+    current = await currentPageNumber(page);
+    if (current === before) break; // the viewer won't move (last page, or a gate)
+  }
+  return current;
+}
+
+/**
+ * Memory shed for a deck in progress: close the viewer tab (its renderer, and
+ * with it every decoded slide the viewer kept, goes away), open a fresh one on
+ * the same URL with the session cookies and show the page to continue at. The
+ * old tab goes first so the two renderers never coexist on the 512MB instance.
+ * Throws CaptureAborted when the fresh tab does not reach the viewer (an
+ * expired session, a gate): the capture cannot continue without a tab.
+ */
+async function recycleViewerTab(page, { resumeAt, onPageReplaced = noop } = {}) {
+  const url = page.url();
+  const browser = page.browser();
+  const viewport = page.viewport();
+  const cookies = await page.cookies().catch(() => []);
+  console.log(`Recycling the viewer tab to give its memory back; continuing at page ${resumeAt}`);
+  const started = Date.now();
+  memory.logUsage('before the tab recycle');
+  const fresh = await openViewerPage(browser, { cookies });
+  if (viewport && (viewport.width !== 1920 || viewport.height !== 1080)) await fresh.setViewport(viewport);
+  await page.close().catch(() => {});
+  await onPageReplaced(fresh);
+  // The old renderer exits a moment after its tab closes; let it go before
+  // the fresh one starts to grow.
+  await fresh.waitForTimeout(2000);
+  memory.logUsage('with the old tab closed');
+  try {
+    await fresh.goto(url, { waitUntil: 'networkidle0', timeout: 120000 });
+    await dismissCookieBanner(fresh).catch(() => {});
+    await fresh.waitForSelector('img.preso-view.page-view', { timeout: 20000 });
+  } catch (e) {
+    throw new CaptureAborted(`the viewer tab could not be reopened after shedding memory (${e.message})`);
+  }
+  await prepareDeckViewer(fresh);
+  const landed = await jumpToPage(fresh, resumeAt);
+  memory.logUsage('after the tab recycle');
+  console.log(`Viewer tab recycled in ${Math.round((Date.now() - started) / 1000)}s; viewer on page ${landed}`);
+  return fresh;
+}
+
+async function capturePages(page, { onCheckpoint = noop, abort = new AbortFlag(), shed = null, onPageReplaced = noop } = {}) {
   abort.check();
   // Branch for vertical DocSend docs — body.vertical is set on portrait/long-form docs
   // where ArrowRight navigation doesn't work and the landscape viewport clips content.
@@ -703,38 +896,7 @@ async function capturePages(page, { onCheckpoint = noop, abort = new AbortFlag()
   }
 
   console.log('Capturing document pages...');
-  await page.evaluate(() => {
-    const selectors = [
-      'header', '.header', '.top-bar', '.presentation-toolbar',
-      '.navbar-fixed-bottom', '.bottom-bar', '.presentation-fixed-footer'
-    ];
-    selectors.forEach(sel =>
-      document.querySelectorAll(sel).forEach(el => el.style.display = 'none')
-    );
-  });
-  console.log('UI hidden; focusing page');
-  const { width, height } = page.viewport();
-  await page.mouse.click(width / 2, height / 2);
-  await page.evaluate(() => {
-    const el = document.querySelector('#onetrust-consent-sdk');
-    if (el) el.style.display = 'none';
-  });
-  await page.waitForFunction(
-    () => !document.querySelector('.loading-spinner') && !document.querySelector('.loading'),
-    { timeout: 30000 }
-  );
-  // The preso-view waitForSelector below covers slide readiness; this is just
-  // a short settle for layout after hiding the UI chrome.
-  await page.waitForTimeout(1000);
-
-  // Decks render each slide as <img class="preso-view page-view">. Wait for the
-  // first one so we don't start capturing a blank viewer. If it never appears
-  // (unexpected viewer markup) we still proceed and rely on full-page fallback.
-  try {
-    await page.waitForSelector('img.preso-view.page-view', { timeout: 15000 });
-  } catch (e) {
-    console.log('No preso-view slide image appeared within timeout; relying on full-page screenshots');
-  }
+  await prepareDeckViewer(page);
 
   await onCheckpoint('capture-ready', { page });
   const screenshots = [];
@@ -742,10 +904,16 @@ async function capturePages(page, { onCheckpoint = noop, abort = new AbortFlag()
   let pageNum = 1;
   while (true) {
     abort.check();
-    const current = await page.evaluate(() => {
-      const el = document.querySelector('span[aria-label="page number"]');
-      return el ? parseInt(el.textContent, 10) : null;
-    });
+    // The watchdog wants memory back: swap the tab for a fresh one showing the
+    // page we are about to capture (only possible when the viewer counts pages).
+    if (shed && shed.requested && lastPage !== null) {
+      await shed.service(async () => {
+        page = await recycleViewerTab(page, { resumeAt: lastPage + 1, onPageReplaced });
+        return true;
+      });
+      abort.check();
+    }
+    const current = await currentPageNumber(page);
     console.log(`Capturing page ${pageNum} (reported page number ${current})`);
 
     // Prefer the decoded slide <img> over a viewport screenshot — a full-page
@@ -767,10 +935,7 @@ async function capturePages(page, { onCheckpoint = noop, abort = new AbortFlag()
     lastPage = current;
     pageNum++;
     await page.keyboard.press('ArrowRight');
-    await page.waitForFunction(
-      () => !document.querySelector('.loading-spinner') && !document.querySelector('.loading'),
-      { timeout: 30000 }
-    );
+    await waitForViewerIdle(page);
     // Wait for the page counter to advance instead of sleeping a fixed 2s.
     // On the last slide it never advances — the 2s timeout fires once and the
     // duplicate-page check above terminates the loop, same as before.
@@ -832,7 +997,11 @@ async function captureLoadedDocument(page, {
   email = process.env.DOCSEND_EMAIL,
   onCheckpoint = noop,
   parkOnVerificationWall = true,
-  abort = new AbortFlag()
+  abort = new AbortFlag(),
+  // Memory shedding: the deck loop recycles its tab on request and reports
+  // the replacement through onPageReplaced(newPage).
+  shed = null,
+  onPageReplaced = noop
 } = {}) {
   console.log('Waiting for document to be fully loaded...');
   await page.waitForFunction(() => {
@@ -1237,7 +1406,7 @@ async function captureLoadedDocument(page, {
   console.log('Proceeding to capture document pages');
   abort.check();
   try {
-    return await capturePages(page, { onCheckpoint, abort });
+    return await capturePages(page, { onCheckpoint, abort, shed, onPageReplaced });
   } catch (captureError) {
     // An abort is deliberate: no fallback screenshot, the caller handles it.
     if (captureError.code === 'CAPTURE_ABORTED' || abort.aborted) {
@@ -1478,6 +1647,9 @@ async function enumerateDataroomViaDom(page) {
 }
 
 const MEMORY_SKIP_REASON = "too large for this instance's memory";
+// How long a shed waits for the deck loop to recycle its tab (the swap itself
+// takes about ten seconds: a fresh navigation plus the jump to the page).
+const SHED_RECYCLE_WAIT_MS = 30000;
 
 async function convertDataroom(initialBrowser, rootPage, {
   url,
@@ -1494,7 +1666,11 @@ async function convertDataroom(initialBrowser, rootPage, {
   abort = new AbortFlag(),
   watchdog = null,
   // Closes the current browser and returns a fresh one (memory pressure).
-  relaunchBrowser = null
+  relaunchBrowser = null,
+  // Told which tab is being captured (null between documents) so memory
+  // shedding can close every other one.
+  trackPage = () => {},
+  shed = null
 }) {
   let browser = initialBrowser;
   const spaceId = (rootPage.url().match(/\/view\/s\/([^/?#]+)/) || url.match(/\/view\/(?:s\/)?([^/?#]+)/) || [])[1];
@@ -1588,22 +1764,27 @@ async function convertDataroom(initialBrowser, rootPage, {
         continue;
       }
       docPage = await openViewerPage(browser, { cookies: sessionCookies });
+      trackPage(docPage);
       abort.check();
       await docPage.goto(doc.url, { waitUntil: 'networkidle0', timeout: 120000 });
-      const screenshots = await captureLoadedDocument(docPage, {
-        messageText, email, onCheckpoint: docCheckpoint, parkOnVerificationWall: false, abort
+      let screenshots = await captureLoadedDocument(docPage, {
+        messageText, email, onCheckpoint: docCheckpoint, parkOnVerificationWall: false, abort, shed,
+        onPageReplaced: (p) => { docPage = p; trackPage(p); }
       });
       console.log(`Dataroom document ${docLabel} captured: ${screenshots.length} page(s)`);
       sessionCookies = await docPage.cookies().catch(() => sessionCookies);
       await docPage.close().catch(() => {});
       docPage = null;
-      const converted = { ...base, screenshots };
+      trackPage(null);
       if (onDocument) {
-        await onDocument(converted, i, documents.length);
-        // Drop the page buffers once the caller has handled them.
-        results.push({ ...base, pages: screenshots.length });
+        const pages = screenshots.length;
+        await onDocument({ ...base, screenshots }, i, documents.length);
+        // The caller has built and posted the PDF: let the page buffers go
+        // before the next document starts.
+        screenshots = null;
+        results.push({ ...base, pages });
       } else {
-        results.push(converted);
+        results.push({ ...base, screenshots });
       }
     } catch (docError) {
       if (abort.aborted || docError.code === 'CAPTURE_ABORTED') {
@@ -1626,6 +1807,7 @@ async function convertDataroom(initialBrowser, rootPage, {
     } finally {
       // One document tab at a time: the instance has 512MB.
       if (docPage) await docPage.close().catch(() => {});
+      trackPage(null);
       memory.logUsage(`after document ${docLabel}`);
     }
   }
@@ -1672,11 +1854,30 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
   let browser;
   let page;
 
-  // The memory watchdog flags the capture; the loops stop at the next check.
+  // The memory watchdog first sheds what it can (every tab but the one being
+  // captured, Node's garbage, then the viewer tab itself); if that isn't
+  // enough it flags the capture and the loops stop at the next check.
   const abort = new AbortFlag();
+  const active = { page: null };
+  const shedRequests = new ShedRequests();
+  const shed = async ({ threshold }) => {
+    // Cheap first: spare tabs and Node's garbage.
+    const target = active.page && !active.page.isClosed() ? active.page : null;
+    const report = await shedBrowserMemory(browser, target);
+    const gc = memory.forceGc();
+    const after = memory.usage();
+    console.log(`Memory shed: closed ${report.closedPages} spare tab(s), Node GC ${gc ? 'ran' : 'unavailable'}; now ${memory.formatMB(after)}`);
+    if (after <= threshold) return;
+    // Still high: the viewer keeps a decoded bitmap of every slide it has
+    // shown, and only a fresh tab gives those back. The deck loop swaps tabs
+    // at its next page boundary and resumes where it was.
+    const recycled = await shedRequests.request(SHED_RECYCLE_WAIT_MS);
+    console.log(`Memory shed: viewer tab ${recycled ? 'recycled' : 'not recycled (no deck capture in progress)'}; now ${memory.formatMB(memory.usage())}`);
+  };
   const watchdog = memory.watch(({ usage, limit }) =>
-    abort.abort(`memory pressure: ${memory.formatMB(usage)} of ${memory.formatMB(limit)} in use`));
+    abort.abort(`memory pressure: ${memory.formatMB(usage)} of ${memory.formatMB(limit)} in use`), { onShed: shed });
   const relaunchBrowser = async () => {
+    active.page = null;
     if (dedicated) {
       if (browser) await browser.close().catch(() => {});
     } else {
@@ -1691,6 +1892,7 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
     memory.logUsage('at job start');
     browser = await launch();
     page = await openViewerPage(browser, { cookies });
+    active.page = page;
 
     if (verifyUrl) {
       console.log('Opening verification link...');
@@ -1723,14 +1925,18 @@ async function convertDocSendToPDF(url, messageText, opts = {}) {
       console.log('DocSend dataroom detected at', page.url());
       const room = await convertDataroom(browser, page, {
         url, messageText, email, onCheckpoint, verifyUrl, onDocument,
-        startIndex, onSession, abort, watchdog, relaunchBrowser
+        startIndex, onSession, abort, watchdog, relaunchBrowser,
+        trackPage: (p) => { active.page = p; },
+        shed: shedRequests
       });
       memory.logUsage('at job end');
       return room;
     }
 
     const screenshots = await captureLoadedDocument(page, {
-      messageText, email, onCheckpoint, parkOnVerificationWall: !verifyUrl, abort
+      messageText, email, onCheckpoint, parkOnVerificationWall: !verifyUrl, abort,
+      shed: shedRequests,
+      onPageReplaced: (p) => { page = p; active.page = p; }
     });
     memory.logUsage('at job end');
     return screenshots;
@@ -1839,6 +2045,9 @@ module.exports = {
   PasscodeRequired,
   CaptureAborted,
   AbortFlag,
+  ShedRequests,
+  recycleViewerTab,
+  jumpToPage,
   MEMORY_SKIP_REASON,
   convertDocSendToPDF,
   convertDataroom,

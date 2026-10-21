@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js",
-    "debug": "node debug.js"
+    "start": "node --expose-gc app.js",
+    "debug": "node --expose-gc debug.js"
   },
   "keywords": [],
   "author": "",
