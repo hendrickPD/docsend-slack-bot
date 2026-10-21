@@ -39,20 +39,46 @@ function readFileNumber(path) {
   }
 }
 
-// memory.current/usage_in_bytes count the page cache too; the kernel drops
-// inactive file pages before it kills anything, so subtract them the way
-// `docker stats` does. Without the stat file the raw figure is used.
-function readInactiveFile(statPath) {
+// memory.current/usage_in_bytes count the page cache too: Chromium's ~200MB
+// of binaries and libraries sit there as clean file pages the kernel can drop
+// at any time, and it does so long before it kills anything. What actually
+// counts against the limit is what cannot be reclaimed: anonymous memory
+// (heaps, decoded bitmaps), shared memory and kernel allocations. Read those
+// from memory.stat; with an incomplete stat file fall back to usage minus
+// inactive file pages (what `docker stats` shows); without a stat file use
+// the raw figure.
+function readStat(statPath) {
+  const out = {};
   try {
-    const stat = fs.readFileSync(statPath, 'utf8');
-    const line = stat.split('\n').find(l => l.startsWith('inactive_file ') || l.startsWith('total_inactive_file '));
-    if (!line) return 0;
-    const n = Number(line.split(/\s+/)[1]);
-    return Number.isFinite(n) ? n : 0;
-  } catch (_) {
-    return 0;
-  }
+    for (const line of fs.readFileSync(statPath, 'utf8').split('\n')) {
+      const [key, value] = line.trim().split(/\s+/);
+      const n = Number(value);
+      if (key && Number.isFinite(n)) out[key] = n;
+    }
+  } catch (_) {}
+  return out;
 }
+
+// Returns { bytes, breakdown } or null when the stat file has no usable keys.
+function unreclaimableFromStat(stat) {
+  const anon = stat.anon ?? stat.total_rss ?? stat.rss;
+  if (!Number.isFinite(anon)) return null;
+  const shmem = stat.shmem ?? stat.total_shmem ?? 0;
+  // cgroup v2 kernels from 5.19 report a single "kernel" total; older ones
+  // list the parts.
+  const kernel = Number.isFinite(stat.kernel)
+    ? stat.kernel
+    : (stat.kernel_stack ?? 0) + (stat.slab_unreclaimable ?? 0) + (stat.sock ?? 0) + (stat.percpu ?? 0) + (stat.pagetables ?? 0);
+  const file = stat.file ?? stat.total_cache ?? stat.cache ?? 0;
+  return { bytes: anon + shmem + kernel, breakdown: { anon, shmem, kernel, file } };
+}
+
+function readInactiveFile(stat) {
+  const n = stat.inactive_file ?? stat.total_inactive_file;
+  return Number.isFinite(n) ? n : 0;
+}
+
+let lastBreakdown = null;
 
 function detectSource() {
   if (process.platform === 'linux') {
@@ -109,8 +135,18 @@ function usage() {
   const src = getSource();
   if (src.files) {
     const raw = readFileNumber(src.files.usage);
-    if (raw !== null) return Math.max(0, raw - readInactiveFile(src.files.stat));
+    if (raw !== null) {
+      const stat = readStat(src.files.stat);
+      const unreclaimable = unreclaimableFromStat(stat);
+      if (unreclaimable) {
+        lastBreakdown = { raw, ...unreclaimable.breakdown };
+        return Math.min(raw, unreclaimable.bytes);
+      }
+      lastBreakdown = { raw, inactiveFile: readInactiveFile(stat) };
+      return Math.max(0, raw - readInactiveFile(stat));
+    }
   }
+  lastBreakdown = null;
   return processTreeRss();
 }
 
@@ -182,7 +218,13 @@ function formatMB(bytes) {
 function describe() {
   const used = usage();
   const max = limit();
-  return `${formatMB(used)} of ${formatMB(max)} (${Math.round((used / max) * 100)}%, ${sourceName()})`;
+  let detail = sourceName();
+  if (lastBreakdown && lastBreakdown.anon !== undefined) {
+    detail += `; cgroup total ${formatMB(lastBreakdown.raw)} = anon ${formatMB(lastBreakdown.anon)} + file cache ${formatMB(lastBreakdown.file)} + shmem ${formatMB(lastBreakdown.shmem)} + kernel ${formatMB(lastBreakdown.kernel)}`;
+  } else if (lastBreakdown) {
+    detail += `; cgroup total ${formatMB(lastBreakdown.raw)} minus inactive file ${formatMB(lastBreakdown.inactiveFile)}`;
+  }
+  return `${formatMB(used)} of ${formatMB(max)} (${Math.round((used / max) * 100)}%, ${detail})`;
 }
 
 function logUsage(label) {
@@ -299,4 +341,4 @@ function watch(onPressure, { onShed = null, pollMs = DEFAULT_POLL_MS, graceMs: g
   };
 }
 
-module.exports = { usage, limit, watch, logUsage, describe, formatMB, sourceName, pressureRatio, graceMs, hardRatio, forceGc, MB };
+module.exports = { usage, limit, watch, logUsage, describe, formatMB, sourceName, pressureRatio, graceMs, hardRatio, forceGc, MB, readStat, unreclaimableFromStat, readInactiveFile };
